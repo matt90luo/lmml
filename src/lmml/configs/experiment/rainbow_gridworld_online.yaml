@@ -1,0 +1,21 @@
+# @package _global_
+defaults:
+  - override /env: gridworld
+  - override /data: online
+  - override /net: mlp
+
+algo:
+  lr: 1.0e-3
+  n_step: 3
+  v_min: -2.0
+  v_max: 2.0
+  target_update:
+    mode: hard
+    every: 100
+
+data:
+  online_cold_start_steps: 500
+  steps_per_epoch: 300
+
+trainer:
+  max_epochs: 8

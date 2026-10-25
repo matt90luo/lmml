@@ -1,0 +1,18 @@
+# @package _global_
+defaults:
+  - override /env: gridworld
+  - override /data: warmup_online
+  - override /net: mlp
+
+algo:
+  lr: 1.0e-3
+  n_step: 3
+  v_min: -2.0
+  v_max: 2.0
+
+data:
+  warmup_offline_steps: 600
+  steps_per_epoch: 300
+
+trainer:
+  max_epochs: 8

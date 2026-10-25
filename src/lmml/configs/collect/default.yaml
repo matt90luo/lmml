@@ -1,0 +1,4 @@
+n_transitions: 10000
+policy: uniform
+seed: ${seed}
+save_path: data/gridworld_uniform.npz

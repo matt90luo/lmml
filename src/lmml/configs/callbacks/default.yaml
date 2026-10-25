@@ -1,0 +1,8 @@
+checkpoint:
+  enabled: true
+  dirpath: null
+  filename: best
+  monitor: val/episode_return
+  mode: max
+lr_monitor:
+  enabled: true

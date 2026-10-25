@@ -1,0 +1,27 @@
+lr: 1.0e-3
+gamma: 0.99
+n_step: 3
+num_atoms: 51
+v_min: -2.0
+v_max: 2.0
+use_double: true
+use_dueling: true
+use_noisy: true
+use_per: true
+noisy_std: 0.5
+epsilon:
+  start: 1.0
+  end: 0.05
+  decay_steps: 5000
+target_update:
+  mode: hard
+  every: 100
+  tau: 0.005
+buffer:
+  capacity: 50000
+  alpha: 0.6
+  beta_start: 0.4
+  beta_steps: 10000
+  prioritized: true
+batch_size: 64
+env_steps_per_update: 1

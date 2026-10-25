@@ -1,0 +1,7 @@
+max_epochs: 10
+accelerator: auto
+devices: 1
+gradient_clip_val: 10.0
+log_every_n_steps: 25
+enable_model_summary: false
+enable_progress_bar: true

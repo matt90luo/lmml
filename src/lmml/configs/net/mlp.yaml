@@ -1,0 +1,6 @@
+encoder:
+  arch: mlp
+  hidden_dims: [128, 128]
+  layer_norm: false
+head:
+  hidden_dim: 64

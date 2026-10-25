@@ -1,0 +1,9 @@
+encoder:
+  arch: cnn
+  channels: [32, 64]
+  kernel_sizes: [3, 3]
+  strides: [1, 1]
+  paddings: [1, 1]
+  out_dim: 128
+head:
+  hidden_dim: 64
