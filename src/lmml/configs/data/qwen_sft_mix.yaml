@@ -1,0 +1,27 @@
+sources:
+  - path: ${paths.base_data_dir}/ultrachat_200k
+    max_samples: 30000
+    sample_ratio: null
+  - path: ${paths.base_data_dir}/python-codes-25k
+    max_samples: null
+    sample_ratio: 1.0
+  - path: ${paths.base_data_dir}/OpenR1-Math-220k
+    max_samples: 25000
+    sample_ratio: null
+
+max_length: 2048
+batch_size: 8
+val_batch_size: 8
+num_workers: 4
+preprocessing_num_proc: auto
+val_split_ratio: 0.02
+max_val_samples: 1500
+chat_start_token: "<|im_start|>"
+chat_end_token: "<|im_end|>"
+ignore_index: -100
+pretokenize: true
+group_by_length: true
+mega_batch_mult: 50
+pad_to_multiple_of: 8
+drop_no_target: true
+cache_dir: ${paths.cache_dir}

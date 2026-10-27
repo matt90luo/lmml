@@ -153,9 +153,9 @@ activemq-data/
 .env
 .envrc
 .venv
-env/
-venv/
-ENV/
+/env/
+/venv/
+/ENV/
 env.bak/
 venv.bak/
 
@@ -219,9 +219,10 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# lmml outputs
-outputs/
-multirun/
-lightning_logs/
+# lmml outputs (anchored to repo root so src/lmml/configs/data/ & env/ are never ignored)
+/outputs/
+/multirun/
+/lightning_logs/
+/wandb/
 *.ckpt
-data/
+/data/

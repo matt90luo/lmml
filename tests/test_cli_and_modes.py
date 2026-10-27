@@ -1,10 +1,27 @@
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import numpy as np
 from hydra import compose, initialize_config_module
 
 from lmml.cli import main as cli_main
 from lmml.core.runner import run
+
+
+def test_no_hydra_config_files_are_git_ignored():
+    cfg_root = Path(__file__).resolve().parents[1] / "src" / "lmml" / "configs"
+    yaml_files = sorted(str(p) for p in cfg_root.rglob("*.yaml"))
+    assert len(yaml_files) >= 29
+    res = subprocess.run(
+        ["git", "check-ignore", *yaml_files],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.stdout.strip() == "", f"Config files unexpectedly git-ignored:\n{res.stdout}"
+
 
 
 def test_end_to_end_collect_train_modes_test_predict(tmp_path):

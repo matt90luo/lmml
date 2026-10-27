@@ -1,0 +1,9 @@
+mode: offline
+offline_path: null
+offline_max_samples: null
+offline_precomputed_nstep: false
+warmup_offline_steps: 0
+online_cold_start_steps: 0
+cold_start_policy: uniform
+steps_per_epoch: 500
+eval_episodes: 10
