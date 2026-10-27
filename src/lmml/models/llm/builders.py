@@ -14,6 +14,22 @@ from transformers import AutoModelForCausalLM
 
 console = Console()
 
+
+def _ensure_peft_torchao_compat() -> None:
+    """兼容 Colab 预装旧版 torchao (<0.16.0) 导致 peft.get_peft_model 抛出 ImportError 的问题。"""
+    try:
+        import peft.import_utils as peft_iu
+        import peft.tuners.lora.torchao as peft_torchao
+
+        peft_iu.is_torchao_available()
+    except ImportError as exc:
+        console.print(
+            f"[yellow][Warning] 检测到不兼容的旧版 torchao ({exc})，已自动禁用 PEFT torchao 分发器。[/yellow]"
+        )
+        peft_iu.is_torchao_available = lambda: False  # type: ignore[assignment]
+        peft_torchao.is_torchao_available = lambda: False  # type: ignore[assignment]
+
+
 DEFAULT_QWEN35_LORA_TARGET_MODULES: tuple[str, ...] = (
     "q_proj",
     "k_proj",
@@ -118,6 +134,7 @@ def build_causal_lm(
             model.enable_input_require_grads()
 
     if finetune_mode == "lora":
+        _ensure_peft_torchao_compat()
         target_modules = resolve_lora_target_modules(model, lora_target_modules)
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,

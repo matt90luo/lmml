@@ -17,6 +17,7 @@ dependencies = [
     "rich",
     "safetensors",
     "torch",
+    "torchao>=0.16.0",
     "transformers",
     "wandb",
 ]
@@ -35,7 +36,7 @@ parquet = ["pyarrow"]
 gpu = [
     "bitsandbytes",
     "flash-linear-attention",
-    "torchao",
+    "torchao>=0.16.0",
 ]
 dev = [
     "pytest>=8.0",

@@ -123,6 +123,28 @@ def test_sft_normalization_tokenization_and_datamodule_cache(tmp_path):
     assert len(dm_cached.train_dataset) == len(dm.train_dataset)
 
 
+def test_peft_torchao_old_version_fallback(tmp_path, monkeypatch):
+    import peft.import_utils as peft_iu
+    import peft.tuners.lora.torchao as peft_torchao
+
+    from lmml.models.llm import build_causal_lm
+
+    model_dir = create_tiny_qwen_model_and_tokenizer(tmp_path / "tiny_qwen")
+
+    def _raise_old_torchao():
+        raise ImportError(
+            "Found an incompatible version of torchao. Found version 0.10.0, "
+            "but only versions above 0.16.0 are supported"
+        )
+
+    monkeypatch.setattr(peft_iu, "is_torchao_available", _raise_old_torchao)
+    monkeypatch.setattr(peft_torchao, "is_torchao_available", _raise_old_torchao)
+
+    model = build_causal_lm(str(model_dir), mode="lora", torch_dtype="float32")
+    assert any("lora_" in n for n, p in model.named_parameters() if p.requires_grad)
+
+
+
 def test_end_to_end_qwen35_lora_and_full_sft_recipes(tmp_path):
     base_dir = tmp_path / "colab_root"
     data_dir = base_dir / "datasets"
