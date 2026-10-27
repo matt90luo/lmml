@@ -10,8 +10,8 @@ sources:
     sample_ratio: null
 
 max_length: 2048
-batch_size: 8
-val_batch_size: 8
+batch_size: 4
+val_batch_size: 4
 num_workers: 4
 preprocessing_num_proc: auto
 val_split_ratio: 0.02

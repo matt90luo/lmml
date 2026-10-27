@@ -27,6 +27,7 @@ class CausalLMSFTRecipe(Recipe):
     def __init__(self, cfg: DictConfig):
         super().__init__(cfg)
         os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         matmul_prec = str(cfg.algo.get("matmul_precision", "high"))
         torch.set_float32_matmul_precision(matmul_prec)
 

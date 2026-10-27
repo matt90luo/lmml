@@ -144,6 +144,28 @@ def test_peft_torchao_old_version_fallback(tmp_path, monkeypatch):
     assert any("lora_" in n for n, p in model.named_parameters() if p.requires_grad)
 
 
+def test_chunked_for_causal_lm_loss_matches_reference():
+    from transformers.loss.loss_utils import ForCausalLMLoss
+
+    from lmml.models.llm import chunked_for_causal_lm_loss
+
+    torch.manual_seed(7)
+    logits_ref = torch.randn(2, 32, 128, dtype=torch.bfloat16, requires_grad=True)
+    logits_chk = logits_ref.detach().clone().requires_grad_(True)
+    labels = torch.randint(0, 128, (2, 32))
+    labels[:, :10] = -100
+
+    loss_ref = ForCausalLMLoss(logits_ref, labels, vocab_size=128)
+    loss_ref.backward()
+
+    loss_chk = chunked_for_causal_lm_loss(logits_chk, labels, vocab_size=128, chunk_size=8)
+    loss_chk.backward()
+
+    assert torch.allclose(loss_ref, loss_chk, atol=1e-5)
+    assert torch.allclose(logits_ref.grad, logits_chk.grad, atol=1e-4)
+
+
+
 
 def test_end_to_end_qwen35_lora_and_full_sft_recipes(tmp_path):
     base_dir = tmp_path / "colab_root"

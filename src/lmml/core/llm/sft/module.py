@@ -76,11 +76,15 @@ class CausalLMSFTLightningModule(pl.LightningModule):
         attention_mask: torch.Tensor,
         labels: torch.Tensor | None = None,
     ) -> Any:
-        return self.model(
+        outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
         )
+        if labels is not None and hasattr(outputs, "logits"):
+            # 训练/验证只需标量 loss，立即释放巨大的 [B, T, V] logits 显存引用
+            outputs.logits = None
+        return outputs
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         outputs = self(

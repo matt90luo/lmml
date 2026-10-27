@@ -7,12 +7,66 @@ from collections.abc import Sequence
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from peft import LoraConfig, TaskType, get_peft_model
 from rich.console import Console
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM
 
 console = Console()
+
+
+def chunked_for_causal_lm_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    vocab_size: int,
+    num_items_in_batch: torch.Tensor | int | None = None,
+    ignore_index: int = -100,
+    shift_labels: torch.Tensor | None = None,
+    chunk_size: int = 512,
+    **_kwargs: Any,
+) -> torch.Tensor:
+    """分块计算 CausalLM 交叉熵损失，避免对 [B, T, V] (Qwen3.5 V=248,320) 一次性执行 logits.float() 导致 15GB+ 显存尖峰。"""
+    if shift_labels is None:
+        labels = F.pad(labels, (0, 1), value=ignore_index)
+        shift_labels = labels[..., 1:].contiguous()
+
+    flat_logits = logits.view(-1, vocab_size)
+    flat_labels = shift_labels.view(-1).to(flat_logits.device)
+
+    if num_items_in_batch is not None:
+        denom = (
+            num_items_in_batch.to(flat_logits.device)
+            if torch.is_tensor(num_items_in_batch)
+            else float(num_items_in_batch)
+        )
+    else:
+        denom = (flat_labels != ignore_index).sum().clamp(min=1)
+
+    def _chunk_ce(lg_chunk: torch.Tensor, lb_chunk: torch.Tensor) -> torch.Tensor:
+        return F.cross_entropy(
+            lg_chunk.float(),
+            lb_chunk,
+            ignore_index=ignore_index,
+            reduction="sum",
+        )
+
+    n_tokens = flat_labels.numel()
+    chunk_losses: list[torch.Tensor] = []
+    use_ckpt = torch.is_grad_enabled() and flat_logits.requires_grad
+    for start in range(0, n_tokens, chunk_size):
+        end = min(start + chunk_size, n_tokens)
+        lg_c = flat_logits[start:end]
+        lb_c = flat_labels[start:end]
+        if use_ckpt:
+            c_loss = checkpoint(_chunk_ce, lg_c, lb_c, use_reentrant=False)
+        else:
+            c_loss = _chunk_ce(lg_c, lb_c)
+        chunk_losses.append(c_loss)
+
+    return torch.stack(chunk_losses).sum() / denom
+
 
 
 def _ensure_peft_torchao_compat() -> None:
@@ -119,6 +173,7 @@ def build_causal_lm(
         device_map=None,
         trust_remote_code=trust_remote_code,
     )
+    model.loss_function = chunked_for_causal_lm_loss
 
     if eos_token_id is not None:
         model.config.eos_token_id = int(eos_token_id)
