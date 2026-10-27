@@ -165,6 +165,25 @@ def test_chunked_for_causal_lm_loss_matches_reference():
     assert torch.allclose(logits_ref.grad, logits_chk.grad, atol=1e-4)
 
 
+def test_lora_gradient_checkpointing_layers_in_train_mode(tmp_path):
+    from lmml.models.llm import build_causal_lm
+
+    model_dir = create_tiny_qwen_model_and_tokenizer(tmp_path / "tiny_qwen_gc")
+    model = build_causal_lm(
+        str(model_dir),
+        mode="lora",
+        torch_dtype="float32",
+        use_gradient_checkpointing=True,
+    )
+    # 所有子模块必须处于 train() 状态，否则 GradientCheckpointingLayer 会因 self.training=False 跳过检查点
+    eval_modules = [name for name, mod in model.named_modules() if not mod.training]
+    assert eval_modules == []
+    decoder_layers = [
+        mod for name, mod in model.named_modules() if getattr(mod, "gradient_checkpointing", False)
+    ]
+    assert len(decoder_layers) > 0 and all(layer.training for layer in decoder_layers)
+
+
 
 
 def test_end_to_end_qwen35_lora_and_full_sft_recipes(tmp_path):

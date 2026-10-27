@@ -86,6 +86,10 @@ class CausalLMSFTLightningModule(pl.LightningModule):
             outputs.logits = None
         return outputs
 
+    def on_train_epoch_start(self) -> None:
+        """确保所有子模块（含基座 GradientCheckpointingLayer）在训练阶段始终处于 train() 状态。"""
+        self.model.train()
+
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         outputs = self(
             input_ids=batch["input_ids"],

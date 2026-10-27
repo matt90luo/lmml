@@ -60,7 +60,7 @@ def chunked_for_causal_lm_loss(
         lg_c = flat_logits[start:end]
         lb_c = flat_labels[start:end]
         if use_ckpt:
-            c_loss = checkpoint(_chunk_ce, lg_c, lb_c, use_reentrant=False)
+            c_loss = checkpoint(_chunk_ce, lg_c, lb_c, use_reentrant=True)
         else:
             c_loss = _chunk_ce(lg_c, lb_c)
         chunk_losses.append(c_loss)
@@ -200,11 +200,14 @@ def build_causal_lm(
             target_modules=target_modules,
         )
         model = get_peft_model(model, peft_config)
-
     else:
-        model.train()
         for param in model.parameters():
             param.requires_grad = True
+
+    # 关键：from_pretrained 默认返回 eval() 状态，且 get_peft_model 仅将新增 LoRA 层置为 train()，
+    # 会导致基座 Qwen3_5DecoderLayer (GradientCheckpointingLayer) 的 self.training=False，
+    # 从而使梯度检查点完全失效并在 Lightning fit_loop 中被锁定为 eval 模式。
+    model.train()
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
