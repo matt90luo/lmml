@@ -1,0 +1,33 @@
+# @package _global_
+defaults:
+  - override /recipe: causal_lm_sft
+  - override /algo: sft_full
+  - override /data: qwen_sft_mix
+  - override /trainer: colab_sft
+  - override /net: null
+  - override /env: null
+  - override /collect: null
+
+optimized_metric: val/loss
+
+eval:
+  enabled: false
+
+callbacks:
+  checkpoint:
+    dirpath: ${paths.base_dir}/checkpoints_full
+    filename: qwen-full-sft-{epoch:02d}-{step:06d}
+    monitor: val/loss
+    mode: min
+    save_top_k: 1
+    save_last: false
+    save_weights_only: true
+
+logger:
+  project: lmml-projects
+  name: qwen3_5-0.8b-full-sft
+  tags:
+    - llm
+    - sft
+    - qwen3.5
+    - full

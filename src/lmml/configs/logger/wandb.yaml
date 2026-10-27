@@ -1,0 +1,11 @@
+project: lmml-projects
+name: null
+save_dir: ${hydra:runtime.output_dir}
+offline: false
+log_model: false
+group: null
+job_type: ${command}
+tags: []
+entity: null
+notes: null
+secret_name: WANDB_API_KEY

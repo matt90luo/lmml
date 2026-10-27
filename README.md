@@ -1,29 +1,45 @@
 # lmml
 
-基于 **Hydra** + **PyTorch Lightning** + **TensorBoard** 的 CLI 训练框架（src-layout wheel 包），支持强化学习与通用机器学习/深度学习模型。
+基于 **Hydra** + **PyTorch Lightning** + **Weights & Biases (`wandb`)** + **Rich** 的 CLI 训练框架（src-layout wheel 包），统一支持 **大语言模型监督微调（Qwen-3.5 LoRA / Full SFT）** 与 **深度强化学习（Rainbow DQN）**。
 
-首个内置算法为 **Rainbow DQN**（C51 + Dueling + Double DQN + PER + $n$-step + NoisyNet），支持 **纯离线（Offline）**、**纯在线（Online）**、**离线预热转在线（Warmup-then-Online，方案 A）** 三种模式，以及可插拔的 `QNetwork` 结构（MLP / CNN / Transformer）。
+## 核心特性
 
-## 快速使用
+1. **LLM 监督微调 (`CausalLMSFTRecipe`)**：
+   - 统一管理 **LoRA (`experiment=qwen35_lora_sft`)** 与 **全量微调 (`experiment=qwen35_full_sft`)** 的共享数据配比、ChatML Prompt Masking、模型底座配置与训练超参数。
+   - **高吞吐数据管线**：顶层纯函数多进程批量清洗与预分词 (`Dataset.map(batched=True, num_proc=auto)`)、本地 SSD Arrow 零拷贝缓存 (`paths.cache_dir`)、按序列长度分桶采样 (`LengthGroupedSampler`) 及 8 倍数对齐动态 Padding。
+   - 训练结束后自动在 CPU 上恢复验证集最优 Checkpoint 并导出 HuggingFace / PEFT 模型与 Tokenizer。
+2. **強化学习 (`RainbowRecipe`)**：
+   - 内置完整 6 组件 **Rainbow DQN**（C51 + Dueling + Double DQN + PER + $n$-step + NoisyNet），支持 **纯离线（Offline）**、**纯在线（Online）**、**离线预热转在线（Warmup-then-Online）** 三种训练模式与可插拔 `QNetwork`（MLP / CNN / Transformer）。
+3. **WandB 日志与 Rich 终端体验**：
+   - 全局默认接入 `WandbLogger` (`project=lmml-projects`)，自动按 `os.environ["WANDB_API_KEY"]` -> `google.colab.userdata.get("WANDB_API_KEY")` -> `~/.netrc` 解析认证。
+   - 内置自定义主题 `RichProgressBar` 与 `RichModelSummary(max_depth=2)`。
+
+## Google Colab 快速开始
+
+```python
+# 在 Colab 单元格中安装 wheel（按需附加 gpu 算子扩展）并透传 WANDB_API_KEY 至子进程环境变量
+import os
+from google.colab import userdata
+
+os.environ["WANDB_API_KEY"] = userdata.get("WANDB_API_KEY")
+```
 
 ```bash
-# 1. 采样棋盘环境离线数据（默认 uniform 策略）
+# 1. Qwen-3.5 0.8B LoRA 微调
+lmml train experiment=qwen35_lora_sft
+
+# 2. Qwen-3.5 0.8B 全量微调 (Full Fine-Tuning)
+lmml train experiment=qwen35_full_sft
+
+# 3. 覆盖路径或超参数示例
+lmml train experiment=qwen35_lora_sft \
+  paths.base_data_dir=/content/drive/MyDrive/colab-notes/data/datasets \
+  paths.base_model_dir=/content/drive/MyDrive/colab-notes/data/models \
+  algo.lr=2e-4 data.batch_size=8
+
+# 4. Rainbow DQN 训练与离线数据采样
 lmml collect env=gridworld collect.n_transitions=20000 collect.policy=uniform collect.save_path=data/grid.npz
-
-# 2. 纯在线训练 Rainbow DQN
 lmml train experiment=rainbow_gridworld_online
-
-# 3. 纯离线训练（训练循环完全不调用 env.step）
 lmml train experiment=rainbow_gridworld_offline data.offline_path=data/grid.npz
-
-# 4. 方案 A：离线预热 + 在线微调
 lmml train experiment=rainbow_gridworld_warmup data.offline_path=data/grid.npz data.warmup_offline_steps=1000
-
-# 5. 切换不同 Q(s,a) 网络结构（MLP / Transformer / CNN）
-lmml train experiment=rainbow_gridworld_online net=transformer
-lmml train experiment=rainbow_gridworld_online env.kwargs.obs_mode=image net=cnn
-
-# 6. 测试与预测导出
-lmml test ckpt_path=outputs/.../last.ckpt
-lmml predict ckpt_path=outputs/.../last.ckpt predict.output=predictions.npz
 ```

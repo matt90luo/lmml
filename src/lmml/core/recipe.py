@@ -12,7 +12,7 @@ from omegaconf import DictConfig
 class Recipe(ABC):
     """一个训练/评估/预测任务的构建配方。
 
-    新增任何 RL / ML / DL 模型时，只需继承 ``Recipe`` 并新增 ``configs/recipe/<name>.yaml``，
+    新增任何 RL / LLM / ML / DL 模型时，只需继承 ``Recipe`` 并新增 ``configs/recipe/<name>.yaml``，
     无需改动 CLI 或 runner。
     """
 
@@ -31,6 +31,23 @@ class Recipe(ABC):
 
     def build_callbacks(self, datamodule: pl.LightningDataModule) -> list[pl.Callback]:
         return []
+
+    def adapt_trainer_kwargs(
+        self,
+        trainer_kwargs: dict[str, Any],
+        datamodule: pl.LightningDataModule,
+    ) -> dict[str, Any]:
+        """可选钩子：根据数据模块规模自适应修正 Trainer 参数（如小样本下的 val_check_interval）。"""
+        return trainer_kwargs
+
+    def on_fit_end(
+        self,
+        trainer: pl.Trainer,
+        module: pl.LightningModule,
+        datamodule: pl.LightningDataModule,
+    ) -> None:
+        """可选钩子：训练结束后的收尾操作（如恢复最优检查点并导出 HuggingFace 权重）。"""
+        return
 
     def save_predictions(self, predictions: list[Any], output_path: str) -> str:
         return output_path

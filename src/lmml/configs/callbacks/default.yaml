@@ -4,5 +4,23 @@ checkpoint:
   filename: best
   monitor: val/episode_return
   mode: max
+  save_top_k: 1
+  save_last: true
+  save_weights_only: false
 lr_monitor:
   enabled: true
+rich_progress:
+  enabled: true
+  leave: true
+  theme:
+    description: green_yellow
+    progress_bar: cyan
+    progress_bar_finished: green
+    progress_bar_pulse: magenta
+    batch_progress: white
+    time: grey54
+    processing_speed: bright_yellow
+    metrics: yellow
+rich_summary:
+  enabled: true
+  max_depth: 2

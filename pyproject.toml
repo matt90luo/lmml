@@ -1,18 +1,24 @@
 [project]
 name = "lmml"
 dynamic = ["version"]
-description = "CLI toolkit for RL / ML training with Hydra + Lightning + TensorBoard"
+description = "CLI toolkit for RL / LLM / ML training with Hydra + Lightning + WandB"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "accelerate",
+    "datasets",
     "einops",
     "gymnasium[classic-control]",
     "hydra-core",
     "lightning",
     "numpy",
     "omegaconf",
-    "tensorboard",
+    "peft",
+    "rich",
+    "safetensors",
     "torch",
+    "transformers",
+    "wandb",
 ]
 
 # 注册命令行 CLI 命令
@@ -26,6 +32,11 @@ path = "src/lmml/__about__.py"
 [project.optional-dependencies]
 h5 = ["h5py"]
 parquet = ["pyarrow"]
+gpu = [
+    "bitsandbytes",
+    "flash-linear-attention",
+    "torchao",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.3.0",

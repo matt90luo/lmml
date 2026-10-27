@@ -1,4 +1,0 @@
-_target_: lightning.pytorch.loggers.TensorBoardLogger
-save_dir: ${hydra:runtime.output_dir}
-name: tb
-default_hp_metric: false

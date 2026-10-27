@@ -11,18 +11,24 @@ from lmml.__about__ import __version__
 
 COMMANDS = ("train", "test", "predict", "collect")
 
-USAGE = f"""lmml v{__version__} - RL / ML / DL training CLI (Hydra + Lightning + TensorBoard)
+USAGE = f"""lmml v{__version__} - RL / LLM / ML / DL training CLI (Hydra + Lightning + WandB + Rich)
 
 Usage:
   lmml <command> [hydra_overrides...]
 
 Commands:
-  train     Train a model (online, offline, or warmup_online)
+  train     Train an RL or LLM SFT model (LoRA, Full SFT, online/offline/warmup RL)
   test      Evaluate a trained model or checkpoint
-  predict   Run inference and export Q-values / action distributions
+  predict   Run inference / generation and export predictions
   collect   Collect offline transitions from a Gymnasium environment
 
 Examples:
+  # LLM SFT (Qwen-3.5 0.8B LoRA & Full Fine-Tuning on Colab)
+  lmml train experiment=qwen35_lora_sft
+  lmml train experiment=qwen35_full_sft
+  lmml train experiment=qwen35_lora_sft paths.base_data_dir=/content/data trainer.max_epochs=1
+
+  # RL (Rainbow DQN)
   lmml train experiment=rainbow_gridworld_online
   lmml train data=offline data.offline_path=data/grid.npz net=transformer
   lmml train data=warmup_online data.offline_path=data/grid.npz data.warmup_offline_steps=1000

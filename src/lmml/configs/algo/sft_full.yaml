@@ -1,0 +1,15 @@
+defaults:
+  - sft_base
+  - _self_
+
+mode: full
+lr: 2.0e-5
+adam_beta1: 0.9
+adam_beta2: 0.95
+warmup_ratio: 0.05
+use_8bit_optimizer: false
+
+export:
+  enabled: true
+  save_dir: ${paths.base_dir}/qwen_full_sft_final
+  max_shard_size: 4GB

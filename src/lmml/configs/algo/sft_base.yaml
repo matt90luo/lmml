@@ -1,0 +1,38 @@
+mode: lora
+lr: 1.0e-4
+weight_decay: 0.01
+adam_beta1: 0.9
+adam_beta2: 0.999
+warmup_ratio: 0.05
+use_8bit_optimizer: false
+matmul_precision: high
+max_new_tokens: 128
+
+model:
+  name_or_path: ${paths.base_model_dir}/Qwen3.5-0.8B-Base
+  attn_implementation: sdpa
+  torch_dtype: bfloat16
+  use_gradient_checkpointing: true
+  trust_remote_code: true
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  merge_on_save: false
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - in_proj_qkv
+    - in_proj_z
+    - out_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+export:
+  enabled: true
+  save_dir: ${paths.base_dir}/qwen_sft_final
+  max_shard_size: 4GB
