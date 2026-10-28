@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
+import pytest
 import torch
+from datasets import load_from_disk
 from hydra import compose, initialize_config_module
 
+from lmml.cli import main as cli_main
+from lmml.core.llm.sft.recipe import CausalLMSFTRecipe
 from lmml.core.runner import run
 from lmml.datas.llm import (
     LengthGroupedSampler,
@@ -14,10 +19,15 @@ from lmml.datas.llm import (
     create_tiny_qwen_model_and_tokenizer,
     encode_chatml_messages,
     normalize_sft_batch,
+    prepare_llm_dataset,
 )
 
 
-def test_sft_normalization_tokenization_and_datamodule_cache(tmp_path):
+def _use_null_logger(monkeypatch):
+    monkeypatch.setattr("lmml.core.runner.build_logger", lambda cfg: True)
+
+
+def test_sft_normalization_tokenization_and_prepared_datamodule(tmp_path):
     data_root = tmp_path / "datasets"
     model_dir = create_tiny_qwen_model_and_tokenizer(tmp_path / "Qwen3.5-0.8B-Base")
     sources = create_synthetic_sft_datasets(
@@ -71,30 +81,38 @@ def test_sft_normalization_tokenization_and_datamodule_cache(tmp_path):
     )
     assert only_user_truncated is None
 
-    # 3. 验证 UnifiedSFTDataModule 多进程预处理 + 本地 SSD Arrow 缓存 + 8 倍数对齐 Padding + LengthGroupedSampler
-    cache_dir = tmp_path / "sft_cache"
-    dm = UnifiedSFTDataModule(
+    # 3. 独立预处理命令逻辑：批量清洗 + 预分词 + DatasetDict 落盘
+    prepared_path = tmp_path / "prepared" / "qwen_sft_mix"
+    summary = prepare_llm_dataset(
         data_configs=sources,
+        tokenizer=tokenizer,
+        output_dir=prepared_path,
+        task="sft",
+        max_length=128,
+        val_split_ratio=0.1,
+        max_val_samples=8,
+        preprocessing_num_proc=1,
+        seed=42,
+    )
+    assert (prepared_path / "dataset_dict.json").exists()
+    assert summary["train_samples"] == 45 and summary["val_samples"] == 5
+
+    # 4. 验证训练 DataModule 只读取预处理产物 + 8 倍数对齐 Padding + LengthGroupedSampler
+    dm = UnifiedSFTDataModule(
+        prepared_path=prepared_path,
         tokenizer=tokenizer,
         batch_size=4,
         val_batch_size=4,
         max_length=128,
         num_workers=0,
-        preprocessing_num_proc=2,
-        val_split_ratio=0.1,
-        max_val_samples=8,
-        pretokenize=True,
         group_by_length=True,
         pad_to_multiple_of=8,
-        cache_dir=str(cache_dir),
         seed=42,
     )
     dm.setup("fit")
     assert dm.train_dataset is not None and dm.val_dataset is not None
     assert len(dm.train_dataset) + len(dm.val_dataset) == 50
     assert len(dm.train_dataset) == 45 and len(dm.val_dataset) == 5
-    assert any(cache_dir.glob("sft_prepared_*"))
-
     train_loader = dm.train_dataloader()
     assert isinstance(train_loader.sampler, LengthGroupedSampler)
     first_batch = next(iter(train_loader))
@@ -102,25 +120,158 @@ def test_sft_normalization_tokenization_and_datamodule_cache(tmp_path):
     assert first_batch["input_ids"].shape[1] % 8 == 0
     assert torch.any(first_batch["labels"][:, 1:] != -100)
 
-    # 第二次构建命中本地 Arrow 缓存
-    dm_cached = UnifiedSFTDataModule(
-        data_configs=sources,
+    # 第二次构建直接加载同一 DatasetDict
+    dm_loaded = UnifiedSFTDataModule(
+        prepared_path=prepared_path,
         tokenizer=tokenizer,
         batch_size=4,
         val_batch_size=4,
         max_length=128,
         num_workers=0,
-        preprocessing_num_proc=1,
-        val_split_ratio=0.1,
-        max_val_samples=8,
-        pretokenize=True,
         group_by_length=True,
         pad_to_multiple_of=8,
-        cache_dir=str(cache_dir),
         seed=42,
     )
-    dm_cached.setup("fit")
-    assert len(dm_cached.train_dataset) == len(dm.train_dataset)
+    dm_loaded.setup("fit")
+    assert len(dm_loaded.train_dataset) == len(dm.train_dataset)
+
+    # 5. 严格读取：未运行 lmml data 时训练必须立即给出明确提示
+    missing_dm = UnifiedSFTDataModule(
+        prepared_path=tmp_path / "missing",
+        tokenizer=tokenizer,
+    )
+    with pytest.raises(FileNotFoundError, match="lmml data"):
+        missing_dm.setup("fit")
+
+    # 6. overwrite=False 复用已有产物，overwrite=True 可安全覆盖
+    reused = prepare_llm_dataset(
+        data_configs=sources,
+        tokenizer=tokenizer,
+        output_dir=prepared_path,
+        task="sft",
+        overwrite=False,
+    )
+    assert reused["overwritten"] is False
+    overwritten = prepare_llm_dataset(
+        data_configs=sources,
+        tokenizer=tokenizer,
+        output_dir=prepared_path,
+        task="sft",
+        overwrite=True,
+        max_length=128,
+        val_split_ratio=0.1,
+        max_val_samples=8,
+        preprocessing_num_proc=1,
+        seed=42,
+    )
+    assert overwritten["overwritten"] is True
+
+
+@pytest.mark.parametrize("task", ["dpo", "ppo"])
+def test_prepare_dpo_and_ppo_datasets(tmp_path, task):
+    model_dir = create_tiny_qwen_model_and_tokenizer(tmp_path / "tiny_qwen")
+    tokenizer = build_sft_tokenizer(str(model_dir))
+    if task == "dpo":
+        rows = [
+            {
+                "prompt": f"Explain concept {i}",
+                "chosen": f"Concept {i} is useful.",
+                "rejected": f"Concept {i} is unrelated.",
+            }
+            for i in range(6)
+        ]
+    else:
+        rows = [{"prompt": f"Solve the equation for x number {i}"} for i in range(6)]
+    source = tmp_path / f"{task}.jsonl"
+    source.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+
+    output = tmp_path / f"prepared_{task}"
+    summary = prepare_llm_dataset(
+        data_configs=[{"path": str(source), "max_samples": None, "sample_ratio": 1.0}],
+        tokenizer=tokenizer,
+        output_dir=output,
+        task=task,
+        max_length=64,
+        val_split_ratio=0.34,
+        max_val_samples=2,
+        preprocessing_num_proc=1,
+        seed=7,
+    )
+    assert summary["train_samples"] == 4 and summary["val_samples"] == 2
+    loaded = load_from_disk(str(output))
+    expected = "chosen_input_ids" if task == "dpo" else "input_ids"
+    assert expected in loaded["train"].column_names
+    assert len(loaded["train"][0][expected]) > 0
+
+
+def test_prepare_rejects_missing_task_fields(tmp_path):
+    model_dir = create_tiny_qwen_model_and_tokenizer(tmp_path / "tiny_qwen")
+    tokenizer = build_sft_tokenizer(str(model_dir))
+    source = tmp_path / "ppo_data.jsonl"
+    source.write_text(
+        "\n".join(json.dumps({"prompt": f"Question {i}"}) for i in range(4)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="未成功加载任何可用数据集"):
+        prepare_llm_dataset(
+            data_configs=[{"path": str(source)}],
+            tokenizer=tokenizer,
+            output_dir=tmp_path / "prepared_invalid",
+            task="dpo",
+            preprocessing_num_proc=1,
+        )
+
+
+def test_predict_does_not_require_prepared_dataset(tmp_path):
+    model_root = tmp_path / "models"
+    create_tiny_qwen_model_and_tokenizer(model_root / "Qwen3.5-0.8B-Base")
+    missing = tmp_path / "not_prepared"
+    with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
+        cfg = compose(
+            config_name="config",
+            overrides=[
+                "command=predict",
+                "experiment=qwen35_lora_sft",
+                f"paths.base_model_dir={model_root}",
+                f"data.prepared_path={missing}",
+            ],
+        )
+
+    recipe = CausalLMSFTRecipe(cfg)
+    datamodule = recipe.build_datamodule()
+    datamodule.setup("predict")
+    adapted = recipe.adapt_trainer_kwargs({"val_check_interval": 500}, datamodule)
+    assert adapted["val_check_interval"] == 500
+    assert datamodule.train_dataset is None
+
+
+def test_data_cli_command_and_overwrite_control(tmp_path, capsys):
+    data_dir = tmp_path / "datasets"
+    model_root = tmp_path / "models"
+    create_tiny_qwen_model_and_tokenizer(model_root / "Qwen3.5-0.8B-Base")
+    create_synthetic_sft_datasets(data_dir, n_ultrachat=6, n_python_codes=4, n_openr1_math=4)
+    prepared_path = data_dir / "prepared" / "cli_sft"
+
+    overrides = [
+        "data",
+        "experiment=qwen35_lora_sft",
+        f"paths.base_dir={tmp_path}",
+        f"paths.base_data_dir={data_dir}",
+        f"paths.base_model_dir={model_root}",
+        f"data.prepared_path={prepared_path}",
+        "data.max_length=64",
+        "data.val_split_ratio=0.1",
+        "data.max_val_samples=2",
+        "data.preprocessing_num_proc=1",
+    ]
+    cli_main(overrides)
+    assert (prepared_path / "dataset_dict.json").exists()
+
+    first_mtime = (prepared_path / "dataset_dict.json").stat().st_mtime_ns
+    cli_main([*overrides, "data.overwrite=false"])
+    assert (prepared_path / "dataset_dict.json").stat().st_mtime_ns == first_mtime
+    assert "复用已有预处理数据集" in capsys.readouterr().out
 
 
 def test_peft_torchao_old_version_fallback(tmp_path, monkeypatch):
@@ -211,7 +362,8 @@ def test_lora_and_full_gradient_checkpointing_layers_in_train_mode(tmp_path):
 
 
 
-def test_end_to_end_qwen35_lora_and_full_sft_recipes(tmp_path):
+def test_end_to_end_qwen35_lora_and_full_sft_recipes(tmp_path, monkeypatch):
+    _use_null_logger(monkeypatch)
     base_dir = tmp_path / "colab_root"
     data_dir = base_dir / "datasets"
     model_root = base_dir / "models"
@@ -223,7 +375,25 @@ def test_end_to_end_qwen35_lora_and_full_sft_recipes(tmp_path):
         n_openr1_math=12,
     )
 
-    # 1. LoRA SFT 端到端训练 + 验证仅保存 LoRA 权重 + 导出 PEFT Adapter
+    # 1. 独立数据命令生成预处理 DatasetDict
+    with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
+        cfg_data = compose(
+            config_name="config",
+            overrides=[
+                "command=data",
+                "experiment=qwen35_lora_sft",
+                f"paths.base_dir={base_dir}",
+                f"paths.base_data_dir={data_dir}",
+                f"paths.base_model_dir={model_root}",
+                "data.max_length=96",
+                "data.preprocessing_num_proc=1",
+            ],
+        )
+    data_summary = run(cfg_data)
+    assert data_summary["task"] == "sft" and data_summary["train_samples"] > 0
+    assert (Path(data_summary["prepared_path"]) / "dataset_dict.json").exists()
+
+    # 2. LoRA SFT 端到端训练 + 验证仅保存 LoRA 权重 + 导出 PEFT Adapter
     with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
         cfg_lora = compose(
             config_name="config",
@@ -262,7 +432,7 @@ def test_end_to_end_qwen35_lora_and_full_sft_recipes(tmp_path):
     assert (lora_export_dir / "adapter_config.json").exists()
     assert (lora_export_dir / "tokenizer.json").exists()
 
-    # 2. Full SFT 端到端训练 + 导出完整 HuggingFace 模型 + test + predict
+    # 3. Full SFT 端到端训练 + 导出完整 HuggingFace 模型 + test + predict
     with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
         cfg_full = compose(
             config_name="config",
@@ -299,7 +469,7 @@ def test_end_to_end_qwen35_lora_and_full_sft_recipes(tmp_path):
     assert (full_export_dir / "model.safetensors").exists()
     assert (full_export_dir / "tokenizer.json").exists()
 
-    # 3. 基于导出的 Full SFT 检查点运行 test 与 predict
+    # 4. 基于导出的 Full SFT 检查点运行 test 与 predict
     with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
         cfg_test = compose(
             config_name="config",

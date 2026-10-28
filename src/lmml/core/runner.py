@@ -1,4 +1,4 @@
-"""核心任务调度器：分发 train / test / predict / collect 子命令。"""
+"""核心任务调度器：分发 data / train / test / predict / collect 子命令。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from rich.console import Console
 from lmml.core.callbacks import build_rich_callbacks
 from lmml.core.logging import build_logger, finish_logger
 from lmml.core.recipe import Recipe
+from lmml.datas.llm.prepare import prepare_llm_dataset
+from lmml.datas.llm.sft import build_sft_tokenizer
 from lmml.datas.rl.datamodule import make_env_from_cfg
 from lmml.datas.rl.offline_io import save_transitions
 from lmml.envs.collect import collect_offline_data, summarize
@@ -42,6 +44,46 @@ def run_collect(cfg: DictConfig) -> dict:
         env.close()
 
 
+def run_data(cfg: DictConfig) -> dict:
+    data = cfg.data
+    model_cfg = (cfg.get("algo") or {}).get("model")
+    if model_cfg is None:
+        raise ValueError("`lmml data` 需要 LLM 实验配置（缺少 algo.model）。")
+
+    chat_end = str(data.get("chat_end_token", "<|im_end|>"))
+    tokenizer_name = str(data.get("tokenizer_name_or_path") or model_cfg.name_or_path)
+    tokenizer = build_sft_tokenizer(
+        model_name_or_path=tokenizer_name,
+        chat_end_token=chat_end,
+        trust_remote_code=bool(model_cfg.get("trust_remote_code", True)),
+    )
+    raw_sources = OmegaConf.to_container(data.sources, resolve=True)
+    if not isinstance(raw_sources, list):
+        raise TypeError("data.sources 必须为数据源字典列表。")
+    prepared_path = data.get("prepared_path")
+    if not prepared_path:
+        raise ValueError("`lmml data` 必须配置 data.prepared_path。")
+
+    summary = prepare_llm_dataset(
+        data_configs=raw_sources,
+        tokenizer=tokenizer,
+        output_dir=str(prepared_path),
+        task=str(data.get("task", "sft")),
+        overwrite=bool(data.get("overwrite", True)),
+        max_length=int(data.get("max_length", 2048)),
+        val_split_ratio=float(data.get("val_split_ratio", 0.02)),
+        max_val_samples=data.get("max_val_samples", 1500),
+        preprocessing_num_proc=data.get("preprocessing_num_proc", "auto"),
+        chat_start_token=str(data.get("chat_start_token", "<|im_start|>")),
+        chat_end_token=chat_end,
+        ignore_index=int(data.get("ignore_index", -100)),
+        drop_no_target=bool(data.get("drop_no_target", True)),
+        seed=int(cfg.seed),
+    )
+    console.print(f"[bold green][lmml data][/bold green] summary: {summary}")
+    return summary
+
+
 def _merge_callbacks(
     recipe_callbacks: list[pl.Callback],
     rich_callbacks: list[pl.Callback],
@@ -63,8 +105,10 @@ def run(cfg: DictConfig) -> float | dict | None:
     command = str(cfg.command)
     if command == "collect":
         return run_collect(cfg)
+    if command == "data":
+        return run_data(cfg)
     if command not in ("train", "test", "predict"):
-        raise ValueError(f"unsupported command {command!r}; expected train, test, predict, or collect")
+        raise ValueError(f"unsupported command {command!r}; expected data, train, test, predict, or collect")
 
     recipe: Recipe = instantiate(cfg.recipe, cfg=cfg, _recursive_=False)
     datamodule = recipe.build_datamodule()

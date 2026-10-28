@@ -41,38 +41,33 @@ class CausalLMSFTRecipe(Recipe):
         chat_start = str(data.get("chat_start_token", "<|im_start|>"))
         chat_end = str(data.get("chat_end_token", "<|im_end|>"))
 
+        tokenizer_name = str(data.get("tokenizer_name_or_path") or model_cfg.name_or_path)
         tokenizer = build_sft_tokenizer(
-            model_name_or_path=str(model_cfg.name_or_path),
+            model_name_or_path=tokenizer_name,
             chat_end_token=chat_end,
             trust_remote_code=bool(model_cfg.get("trust_remote_code", True)),
         )
 
-        raw_sources = OmegaConf.to_container(data.sources, resolve=True)
-        if not isinstance(raw_sources, list):
-            raise TypeError("data.sources 必须为数据源字典列表。")
-
         raw_prompts = pred_cfg.get("prompts")
         prompts = list(OmegaConf.to_container(raw_prompts, resolve=True)) if raw_prompts else None
 
+        prepared_path = data.get("prepared_path")
+        if not prepared_path:
+            raise ValueError("LLM 训练必须配置 data.prepared_path，并先运行 `lmml data`。")
+
         return UnifiedSFTDataModule(
-            data_configs=raw_sources,
+            prepared_path=str(prepared_path),
             tokenizer=tokenizer,
             batch_size=int(data.get("batch_size", 8)),
             val_batch_size=int(data.get("val_batch_size", data.get("batch_size", 8))),
             max_length=int(data.get("max_length", 2048)),
             num_workers=int(data.get("num_workers", 4)),
-            preprocessing_num_proc=data.get("preprocessing_num_proc", "auto"),
-            val_split_ratio=float(data.get("val_split_ratio", 0.02)),
-            max_val_samples=data.get("max_val_samples", 1500),
             chat_start_token=chat_start,
             chat_end_token=chat_end,
             ignore_index=int(data.get("ignore_index", -100)),
-            pretokenize=bool(data.get("pretokenize", True)),
             group_by_length=bool(data.get("group_by_length", True)),
             mega_batch_mult=int(data.get("mega_batch_mult", 50)),
             pad_to_multiple_of=data.get("pad_to_multiple_of", 8),
-            drop_no_target=bool(data.get("drop_no_target", True)),
-            cache_dir=data.get("cache_dir"),
             predict_prompts=prompts,
             predict_batch_size=int(pred_cfg.get("batch_size", 4)),
             seed=int(cfg.seed),
@@ -130,6 +125,8 @@ class CausalLMSFTRecipe(Recipe):
     ) -> dict[str, Any]:
         """当 val_check_interval 为整数且大于单轮总 batch 数时自动钳制，防止小样本调试报错。"""
         adapted = dict(trainer_kwargs)
+        if str(self.cfg.get("command", "train")) != "train":
+            return adapted
         val_interval = adapted.get("val_check_interval")
         if isinstance(val_interval, int) and val_interval > 1:
             datamodule.setup("fit")

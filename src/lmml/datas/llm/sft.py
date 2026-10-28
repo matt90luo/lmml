@@ -1,9 +1,7 @@
-"""高效 LLM SFT 数据管线：多进程批量标准化与预分词、本地 SSD Arrow 缓存、按长度分桶采样与动态对齐 Padding。"""
+"""LLM SFT 数据读取与训练管线：Arrow DatasetDict 加载、按长度分桶采样与动态对齐 Padding。"""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -11,10 +9,8 @@ from typing import Any
 
 import lightning.pytorch as pl
 import torch
-from datasets import Dataset as HFDataset
-from datasets import DatasetDict, concatenate_datasets, load_dataset, load_from_disk
+from datasets import load_from_disk
 from rich.console import Console
-from rich.table import Table
 from torch.utils.data import DataLoader, Dataset, Sampler
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
@@ -475,28 +471,22 @@ def collate_prompt_predict(
 
 
 class UnifiedSFTDataModule(pl.LightningDataModule):
-    """统一多源 SFT 数据模块：支持多进程批量清洗与预分词、本地 SSD Arrow 缓存及按长度分桶采样。"""
+    """从独立预处理产物读取 SFT 数据，并提供长度分桶采样与动态 Padding。"""
 
     def __init__(
         self,
-        data_configs: list[dict[str, Any]],
+        prepared_path: str | Path,
         tokenizer: PreTrainedTokenizerBase,
         batch_size: int = 8,
         val_batch_size: int = 8,
         max_length: int = 2048,
         num_workers: int = 4,
-        preprocessing_num_proc: int | str | None = "auto",
-        val_split_ratio: float = 0.02,
-        max_val_samples: int | None = 1500,
         chat_start_token: str = DEFAULT_CHAT_START_TOKEN,
         chat_end_token: str = DEFAULT_CHAT_END_TOKEN,
         ignore_index: int = DEFAULT_IGNORE_INDEX,
-        pretokenize: bool = True,
         group_by_length: bool = True,
         mega_batch_mult: int = 50,
         pad_to_multiple_of: int | None = 8,
-        drop_no_target: bool = True,
-        cache_dir: str | None = None,
         predict_prompts: list[str] | None = None,
         predict_batch_size: int = 4,
         seed: int = 42,
@@ -504,24 +494,18 @@ class UnifiedSFTDataModule(pl.LightningDataModule):
         super().__init__()
         if tokenizer is None:
             raise ValueError("必须提供有效的 tokenizer 实例。")
-        self.data_configs = [dict(c) for c in data_configs]
+        self.prepared_path = Path(prepared_path)
         self.tokenizer = tokenizer
         self.batch_size = int(batch_size)
         self.val_batch_size = int(val_batch_size)
         self.max_length = int(max_length)
         self.num_workers = max(0, int(num_workers))
-        self.preprocessing_num_proc = resolve_num_proc(preprocessing_num_proc)
-        self.val_split_ratio = float(val_split_ratio)
-        self.max_val_samples = int(max_val_samples) if max_val_samples is not None else None
         self.chat_start_token = str(chat_start_token)
         self.chat_end_token = str(chat_end_token)
         self.ignore_index = int(ignore_index)
-        self.pretokenize = bool(pretokenize)
         self.group_by_length = bool(group_by_length)
         self.mega_batch_mult = int(mega_batch_mult)
         self.pad_to_multiple_of = int(pad_to_multiple_of) if pad_to_multiple_of else None
-        self.drop_no_target = bool(drop_no_target)
-        self.cache_dir = str(cache_dir) if cache_dir else None
         self.predict_prompts = list(predict_prompts) if predict_prompts else [
             "Explain the difference between LoRA and full fine-tuning in 2 sentences."
         ]
@@ -537,172 +521,26 @@ class UnifiedSFTDataModule(pl.LightningDataModule):
             max_length=self.max_length,
         )
 
-    def _compute_cache_path(self) -> Path | None:
-        if not self.cache_dir:
-            return None
-        meta = {
-            "sources": self.data_configs,
-            "max_length": self.max_length,
-            "val_split_ratio": self.val_split_ratio,
-            "max_val_samples": self.max_val_samples,
-            "chat_start_token": self.chat_start_token,
-            "chat_end_token": self.chat_end_token,
-            "ignore_index": self.ignore_index,
-            "pretokenize": self.pretokenize,
-            "drop_no_target": self.drop_no_target,
-            "seed": self.seed,
-            "tokenizer": getattr(self.tokenizer, "name_or_path", "unknown"),
-            "vocab_size": len(self.tokenizer),
-        }
-        digest = hashlib.sha256(json.dumps(meta, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
-        return Path(self.cache_dir) / f"sft_prepared_{digest}"
-
-    @staticmethod
-    def _load_single_source(path: str) -> HFDataset:
-        if os.path.isdir(path) and (
-            os.path.exists(os.path.join(path, "dataset_info.json"))
-            or os.path.exists(os.path.join(path, "dataset_dict.json"))
-        ):
-            ds = load_from_disk(path)
-        elif os.path.isdir(path):
-            ds = load_dataset(path)
-        elif path.endswith((".json", ".jsonl")):
-            ds = load_dataset("json", data_files=path, split="train")
-        elif path.endswith(".parquet"):
-            ds = load_dataset("parquet", data_files=path, split="train")
-        else:
-            ds = load_dataset(path, split="train")
-
-        if isinstance(ds, (dict, DatasetDict)):
-            ds = ds.get("train", next(iter(ds.values())))
-        return ds
-
-    def _apply_subsampling(self, ds: HFDataset, cfg: dict[str, Any]) -> tuple[HFDataset, int, int]:
-        orig_len = len(ds)
-        target_len = orig_len
-
-        sample_ratio = cfg.get("sample_ratio")
-        max_samples = cfg.get("max_samples")
-
-        if sample_ratio is not None and 0.0 < float(sample_ratio) < 1.0:
-            target_len = int(orig_len * float(sample_ratio))
-        if max_samples is not None and int(max_samples) > 0:
-            target_len = min(target_len, int(max_samples))
-
-        if target_len < orig_len:
-            ds = ds.shuffle(seed=self.seed).select(range(target_len))
-        return ds, orig_len, len(ds)
-
     def setup(self, stage: str | None = None) -> None:
         if self.train_dataset is not None and self.val_dataset is not None:
             return
-
-        cache_path = self._compute_cache_path()
-        if cache_path is not None and (cache_path / "dataset_dict.json").exists():
-            console.print(f"[bold cyan][DataModule][/bold cyan] 命中本地 Arrow 预处理缓存: {cache_path}")
-            split_ds = load_from_disk(str(cache_path))
+        if stage == "predict":
+            return
+        if not self.prepared_path.exists() or not (self.prepared_path / "dataset_dict.json").exists():
+            raise FileNotFoundError(
+                f"未找到预处理数据集: {self.prepared_path}。"
+                "请先运行 `lmml data experiment=...` 生成训练数据。"
+            )
+        split_ds = load_from_disk(str(self.prepared_path))
+        try:
             train_raw = split_ds["train"]
             val_raw = split_ds["val"]
-            self.train_dataset = StandardSFTDataset(
-                train_raw,
-                self.tokenizer,
-                max_length=self.max_length,
-                chat_start_token=self.chat_start_token,
-                chat_end_token=self.chat_end_token,
-                ignore_index=self.ignore_index,
-                pretokenized=self.pretokenize,
-            )
-            self.val_dataset = StandardSFTDataset(
-                val_raw,
-                self.tokenizer,
-                max_length=self.max_length,
-                chat_start_token=self.chat_start_token,
-                chat_end_token=self.chat_end_token,
-                ignore_index=self.ignore_index,
-                pretokenized=self.pretokenize,
-            )
-            return
+        except (KeyError, TypeError) as exc:
+            raise ValueError(
+                f"预处理数据集必须包含 train/val 切分: {self.prepared_path}"
+            ) from exc
 
-        summary_table = Table(title="SFT 数据源抽样与清洗汇总", show_header=True, header_style="bold cyan")
-        summary_table.add_column("数据集", style="white")
-        summary_table.add_column("原始条数", justify="right")
-        summary_table.add_column("抽样后条数", justify="right")
-        summary_table.add_column("有效样本数", justify="right", style="green")
-
-        loaded_datasets: list[HFDataset] = []
-        for cfg in self.data_configs:
-            path = str(cfg["path"])
-            ds_name = os.path.basename(path.rstrip("/")) or path
-            if not os.path.exists(path):
-                console.print(f"[yellow][Warning] 数据路径不存在，已跳过: {path}[/yellow]")
-                continue
-            try:
-                ds = self._load_single_source(path)
-                ds, orig_len, sampled_len = self._apply_subsampling(ds, cfg)
-
-                ds = ds.map(
-                    normalize_sft_batch,
-                    batched=True,
-                    batch_size=1000,
-                    remove_columns=ds.column_names,
-                    num_proc=self.preprocessing_num_proc,
-                    desc=f"Normalizing {ds_name}",
-                )
-
-                if self.pretokenize:
-                    ds = ds.map(
-                        tokenize_sft_batch,
-                        batched=True,
-                        batch_size=1000,
-                        remove_columns=ds.column_names,
-                        num_proc=self.preprocessing_num_proc,
-                        fn_kwargs={
-                            "tokenizer": self.tokenizer,
-                            "max_length": self.max_length,
-                            "chat_start_token": self.chat_start_token,
-                            "chat_end_token": self.chat_end_token,
-                            "ignore_index": self.ignore_index,
-                            "drop_no_target": self.drop_no_target,
-                        },
-                        desc=f"Tokenizing {ds_name}",
-                    )
-
-                if len(ds) > 0:
-                    loaded_datasets.append(ds)
-                summary_table.add_row(ds_name, f"{orig_len:,}", f"{sampled_len:,}", f"{len(ds):,}")
-            except (OSError, ValueError, RuntimeError, KeyError, TypeError) as exc:
-                console.print(f"[red][Error] 读取或处理数据失败 {path}: {exc}[/red]")
-
-        if not loaded_datasets:
-            raise ValueError("未成功加载任何可用数据集，请检查 data.sources 路径配置。")
-
-        console.print(summary_table)
-
-        merged = concatenate_datasets(loaded_datasets).shuffle(seed=self.seed)
-        if len(merged) < 2:
-            raise ValueError(f"有效样本总数过少 ({len(merged)})，无法切分训练与验证集。")
-
-        val_size = int(len(merged) * self.val_split_ratio)
-        if self.max_val_samples is not None and self.max_val_samples > 0:
-            val_size = min(val_size, self.max_val_samples)
-        val_size = max(1, min(val_size, len(merged) - 1))
-
-        split_ds = merged.train_test_split(test_size=val_size, seed=self.seed)
-        train_raw = split_ds["train"]
-        val_raw = split_ds["test"]
-
-        if cache_path is not None:
-            try:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                DatasetDict({"train": train_raw, "val": val_raw}).save_to_disk(str(cache_path))
-                console.print(f"[bold green][DataModule][/bold green] 已保存预处理缓存至: {cache_path}")
-            except (OSError, ValueError, RuntimeError) as exc:
-                console.print(f"[yellow][Warning] 写入缓存目录失败 ({cache_path}): {exc}[/yellow]")
-
-        console.print(
-            f"[bold green][DataModule][/bold green] 数据集准备完毕 -> "
-            f"训练集: [bold]{len(train_raw):,}[/bold] 条 | 验证集: [bold]{len(val_raw):,}[/bold] 条"
-        )
+        console.print(f"[bold cyan][DataModule][/bold cyan] 加载预处理数据集: {self.prepared_path}")
         self.train_dataset = StandardSFTDataset(
             train_raw,
             self.tokenizer,
@@ -710,7 +548,7 @@ class UnifiedSFTDataModule(pl.LightningDataModule):
             chat_start_token=self.chat_start_token,
             chat_end_token=self.chat_end_token,
             ignore_index=self.ignore_index,
-            pretokenized=self.pretokenize,
+            pretokenized=True,
         )
         self.val_dataset = StandardSFTDataset(
             val_raw,
@@ -719,7 +557,7 @@ class UnifiedSFTDataModule(pl.LightningDataModule):
             chat_start_token=self.chat_start_token,
             chat_end_token=self.chat_end_token,
             ignore_index=self.ignore_index,
-            pretokenized=self.pretokenize,
+            pretokenized=True,
         )
 
     def _loader_perf_kwargs(self) -> dict[str, Any]:

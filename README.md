@@ -6,7 +6,8 @@
 
 1. **LLM 监督微调 (`CausalLMSFTRecipe`)**：
    - 统一管理 **LoRA (`experiment=qwen35_lora_sft`)** 与 **全量微调 (`experiment=qwen35_full_sft`)** 的共享数据配比、ChatML Prompt Masking、模型底座配置与训练超参数。
-   - **高吞吐数据管线**：顶层纯函数多进程批量清洗与预分词 (`Dataset.map(batched=True, num_proc=auto)`)、本地 SSD Arrow 零拷贝缓存 (`paths.cache_dir`)、按序列长度分桶采样 (`LengthGroupedSampler`) 及 8 倍数对齐动态 Padding。
+   - **独立数据准备**：`lmml data` 将 SFT / DPO / PPO 数据源的清洗与分词结果保存为 Google Drive 上的 Arrow `DatasetDict`；训练阶段直接加载，避免重复预处理。
+   - **高吞吐训练管线**：按序列长度分桶采样 (`LengthGroupedSampler`) 及 8 倍数对齐动态 Padding。
    - 训练结束后自动在 CPU 上恢复验证集最优 Checkpoint 并导出 HuggingFace / PEFT 模型与 Tokenizer。
 2. **強化学习 (`RainbowRecipe`)**：
    - 内置完整 6 组件 **Rainbow DQN**（C51 + Dueling + Double DQN + PER + $n$-step + NoisyNet），支持 **纯离线（Offline）**、**纯在线（Online）**、**离线预热转在线（Warmup-then-Online）** 三种训练模式与可插拔 `QNetwork`（MLP / CNN / Transformer）。
@@ -25,13 +26,18 @@ os.environ["WANDB_API_KEY"] = userdata.get("WANDB_API_KEY")
 ```
 
 ```bash
-# 1. Qwen-3.5 0.8B LoRA 微调
-lmml train experiment=qwen35_lora_sft
+# 1. 准备并分词训练数据（保存到 paths.prepared_data_dir，默认位于 Google Drive）
+lmml data experiment=qwen35_lora_sft
 
-# 2. Qwen-3.5 0.8B 全量微调 (Full Fine-Tuning)
+# 2. 直接读取已保存数据；LoRA 与 Full SFT 共用同一份预分词结果
+lmml train experiment=qwen35_lora_sft
 lmml train experiment=qwen35_full_sft
 
-# 3. 覆盖路径或超参数示例
+# 3. 覆盖数据源、输出路径或超参数示例
+lmml data experiment=qwen35_lora_sft \
+  paths.base_data_dir=/content/drive/MyDrive/colab-notes/data/datasets \
+  data.prepared_path=/content/drive/MyDrive/colab-notes/data/datasets/prepared/my_sft \
+  data.overwrite=true
 lmml train experiment=qwen35_lora_sft \
   paths.base_data_dir=/content/drive/MyDrive/colab-notes/data/datasets \
   paths.base_model_dir=/content/drive/MyDrive/colab-notes/data/models \

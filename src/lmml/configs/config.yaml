@@ -22,7 +22,7 @@ paths:
   base_dir: /content
   base_data_dir: /content/drive/MyDrive/colab-notes/data/datasets
   base_model_dir: /content/drive/MyDrive/colab-notes/data/models
-  cache_dir: ${paths.base_dir}/.cache/lmml_sft
+  prepared_data_dir: ${paths.base_data_dir}/prepared
 
 eval:
   enabled: true

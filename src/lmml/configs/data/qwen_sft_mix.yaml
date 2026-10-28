@@ -1,3 +1,8 @@
+task: sft
+prepared_path: ${paths.prepared_data_dir}/qwen_sft_mix
+overwrite: true
+tokenizer_name_or_path: ${algo.model.name_or_path}
+
 sources:
   - path: ${paths.base_data_dir}/ultrachat_200k
     max_samples: 30000
@@ -19,9 +24,7 @@ max_val_samples: 1500
 chat_start_token: "<|im_start|>"
 chat_end_token: "<|im_end|>"
 ignore_index: -100
-pretokenize: true
 group_by_length: true
 mega_batch_mult: 50
 pad_to_multiple_of: 8
 drop_no_target: true
-cache_dir: ${paths.cache_dir}

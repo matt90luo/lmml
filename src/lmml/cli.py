@@ -1,4 +1,4 @@
-"""lmml CLI 入口：支持子命令 train / test / predict / collect + Hydra 配置与参数覆盖。"""
+"""lmml CLI 入口：支持子命令 data / train / test / predict / collect + Hydra 配置与参数覆盖。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from omegaconf import DictConfig
 
 from lmml.__about__ import __version__
 
-COMMANDS = ("train", "test", "predict", "collect")
+COMMANDS = ("data", "train", "test", "predict", "collect")
 
 USAGE = f"""lmml v{__version__} - RL / LLM / ML / DL training CLI (Hydra + Lightning + WandB + Rich)
 
@@ -17,12 +17,17 @@ Usage:
   lmml <command> [hydra_overrides...]
 
 Commands:
+  data      Prepare and tokenize LLM datasets for later training
   train     Train an RL or LLM SFT model (LoRA, Full SFT, online/offline/warmup RL)
   test      Evaluate a trained model or checkpoint
   predict   Run inference / generation and export predictions
   collect   Collect offline transitions from a Gymnasium environment
 
 Examples:
+  # Prepare LLM datasets once, then train directly from Google Drive
+  lmml data experiment=qwen35_lora_sft
+  lmml train experiment=qwen35_lora_sft
+
   # LLM SFT (Qwen-3.5 0.8B LoRA & Full Fine-Tuning on Colab)
   lmml train experiment=qwen35_lora_sft
   lmml train experiment=qwen35_full_sft
