@@ -69,6 +69,7 @@ class CausalLMSFTLightningModule(pl.LightningModule):
             lora_dropout=lora_dropout,
             lora_target_modules=self.lora_target_modules,
         )
+        self.train()
 
     def forward(
         self,
@@ -86,8 +87,19 @@ class CausalLMSFTLightningModule(pl.LightningModule):
             outputs.logits = None
         return outputs
 
+    def on_train_start(self) -> None:
+        """训练开始前强制全树进入 train() 状态，确保 LoRA 与 Full 模式下 GradientCheckpointingLayer 均生效。"""
+        self.train()
+        self.model.train()
+
     def on_train_epoch_start(self) -> None:
-        """确保所有子模块（含基座 GradientCheckpointingLayer）在训练阶段始终处于 train() 状态。"""
+        """每个训练 Epoch 开始时确保所有子模块处于 train() 状态。"""
+        self.train()
+        self.model.train()
+
+    def on_validation_model_train(self) -> None:
+        """Sanity Check 或中途验证结束后恢复全树 train() 状态，防止任何子模块残留为 eval()。"""
+        self.train()
         self.model.train()
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:

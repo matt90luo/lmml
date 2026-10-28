@@ -13,14 +13,14 @@ rich_progress:
   enabled: true
   leave: true
   theme:
-    description: green_yellow
-    progress_bar: cyan
-    progress_bar_finished: green
-    progress_bar_pulse: magenta
-    batch_progress: white
-    time: grey54
-    processing_speed: bright_yellow
-    metrics: yellow
+    description: bold black          # 任务描述：纯黑加粗，轮廓最清晰
+    progress_bar: dodger_blue3       # 进行中进度条：稳重清晰的深蓝色，抗白底眩光
+    progress_bar_finished: dark_green # 完成状态：深墨绿色（比标准 green 扎实得多）
+    progress_bar_pulse: slate_blue3  # 脉冲动画：低调深蓝紫
+    batch_progress: grey30           # 批次计数：深灰色，清晰但不抢主视角
+    time: grey42                     # 耗时/剩余：次级深灰
+    processing_speed: dark_cyan      # 速度（it/s）：深青色
+    metrics: dark_orange3            # 监控指标（loss/acc）：深焦糖橙/深红褐色，吸睛醒目且对比度极高
 rich_summary:
   enabled: true
   max_depth: 2

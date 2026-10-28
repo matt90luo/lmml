@@ -165,23 +165,48 @@ def test_chunked_for_causal_lm_loss_matches_reference():
     assert torch.allclose(logits_ref.grad, logits_chk.grad, atol=1e-4)
 
 
-def test_lora_gradient_checkpointing_layers_in_train_mode(tmp_path):
+def test_lora_and_full_gradient_checkpointing_layers_in_train_mode(tmp_path):
+    from transformers.modeling_layers import GradientCheckpointingLayer
+
     from lmml.models.llm import build_causal_lm
 
     model_dir = create_tiny_qwen_model_and_tokenizer(tmp_path / "tiny_qwen_gc")
-    model = build_causal_lm(
-        str(model_dir),
-        mode="lora",
-        torch_dtype="float32",
-        use_gradient_checkpointing=True,
-    )
-    # 所有子模块必须处于 train() 状态，否则 GradientCheckpointingLayer 会因 self.training=False 跳过检查点
-    eval_modules = [name for name, mod in model.named_modules() if not mod.training]
-    assert eval_modules == []
-    decoder_layers = [
-        mod for name, mod in model.named_modules() if getattr(mod, "gradient_checkpointing", False)
-    ]
-    assert len(decoder_layers) > 0 and all(layer.training for layer in decoder_layers)
+    for mode in ("lora", "full"):
+        model = build_causal_lm(
+            str(model_dir),
+            mode=mode,
+            torch_dtype="float32",
+            use_gradient_checkpointing=True,
+        )
+        # 所有子模块必须处于 train() 状态，否则 GradientCheckpointingLayer 会因 self.training=False 跳过检查点
+        eval_modules = [name for name, mod in model.named_modules() if not mod.training]
+        assert eval_modules == [], f"mode={mode} 下存在处于 eval 模式的子模块: {eval_modules}"
+        decoder_layers = [
+            mod for _, mod in model.named_modules() if isinstance(mod, GradientCheckpointingLayer)
+        ]
+        assert len(decoder_layers) == 2 and all(
+            layer.training and layer.gradient_checkpointing for layer in decoder_layers
+        )
+
+        # 验证前向传播期间每个 GradientCheckpointingLayer 均实际触发了 _gradient_checkpointing_func
+        gc_call_count = 0
+        for layer in decoder_layers:
+            orig_gc_fn = layer._gradient_checkpointing_func
+
+            def _wrapped_gc(fn, *args, _orig=orig_gc_fn, **kwargs):
+                nonlocal gc_call_count
+                gc_call_count += 1
+                return _orig(fn, *args, **kwargs)
+
+            layer._gradient_checkpointing_func = _wrapped_gc
+
+        input_ids = torch.randint(0, 100, (2, 16))
+        attn_mask = torch.ones_like(input_ids)
+        out = model(input_ids=input_ids, attention_mask=attn_mask, labels=input_ids.clone())
+        out.loss.backward()
+        assert gc_call_count == len(decoder_layers), (
+            f"mode={mode} 下期望触发 {len(decoder_layers)} 次梯度检查点，实际触发 {gc_call_count} 次"
+        )
 
 
 
