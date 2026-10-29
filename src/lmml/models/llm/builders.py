@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -13,6 +14,9 @@ from rich.console import Console
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM
+
+from lmml.models.llm.minimind import MiniMindConfig, MiniMindForCausalLM
+from lmml.models.llm.minimind_registration import register_minimind
 
 console = Console()
 
@@ -157,22 +161,67 @@ def build_causal_lm(
     lora_alpha: int = 16,
     lora_dropout: float = 0.05,
     lora_target_modules: Sequence[str] | None = None,
+    model_config: dict[str, Any] | None = None,
 ) -> nn.Module:
-    """加载 CausalLM 基座并按 mode ('lora' | 'full') 装配可训练参数与显存优化。"""
+    """加载 CausalLM 基座并按 mode ('lora' | 'full') 装配可训练参数与显存优化。
+
+    ``model_config`` may select ``architecture=minimind`` and describe a
+    from-scratch MiniMind config. If a checkpoint is supplied it is loaded after
+    construction so users are not required to ship an initialized model.
+    """
     finetune_mode = str(mode).strip().lower()
     if finetune_mode not in ("lora", "full"):
         raise ValueError(f"不支持的微调模式 mode={mode!r}，可选值为 'lora' 或 'full'。")
 
     actual_attn = resolve_attn_implementation(attn_implementation)
     resolved_dtype = resolve_torch_dtype(torch_dtype)
+    cfg = dict(model_config or {})
+    architecture = str(cfg.get("architecture") or "auto").lower()
+    init_mode = str(cfg.get("init_mode") or "pretrained").lower()
 
-    model: Any = AutoModelForCausalLM.from_pretrained(
-        model_name_or_path,
-        dtype=resolved_dtype,
-        attn_implementation=actual_attn,
-        device_map=None,
-        trust_remote_code=trust_remote_code,
+    model_path = Path(model_name_or_path)
+    hf_config_exists = model_path.is_dir() and (model_path / "config.json").exists()
+    checkpoint_path = cfg.get("checkpoint_path")
+    use_scratch_config = init_mode == "scratch" or (
+        architecture == "minimind" and not hf_config_exists
     )
+    if use_scratch_config:
+        if init_mode != "scratch" and not checkpoint_path:
+            raise FileNotFoundError(
+                f"MiniMind 阶段 {init_mode!r} 需要 Hugging Face 模型目录或 checkpoint_path；"
+                f"未找到 config.json: {model_name_or_path}"
+            )
+        model_cfg = cfg.get("config")
+        if not isinstance(model_cfg, dict):
+            model_cfg = {
+                k: v
+                for k, v in cfg.items()
+                if k not in {"architecture", "init_mode", "checkpoint_path", "name_or_path"}
+            }
+        config_obj = MiniMindConfig(**model_cfg)
+        model = MiniMindForCausalLM(config_obj)
+        if checkpoint_path:
+            state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            state = state.get("model", state.get("state_dict", state))
+            state = {
+                k.removeprefix("module.").removeprefix("_orig_mod."): v for k, v in state.items()
+            }
+            model.load_state_dict(state, strict=False)
+        if resolved_dtype != "auto":
+            model = model.to(resolved_dtype)
+    else:
+        register_minimind()
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name_or_path,
+            dtype=resolved_dtype,
+            attn_implementation=actual_attn,
+            device_map=None,
+            trust_remote_code=trust_remote_code,
+        )
+        if checkpoint_path:
+            state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            state = state.get("model", state.get("state_dict", state))
+            model.load_state_dict(state, strict=False)
     model.loss_function = chunked_for_causal_lm_loss
 
     if eos_token_id is not None:

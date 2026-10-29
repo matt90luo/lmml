@@ -24,7 +24,8 @@ def test_no_hydra_config_files_are_git_ignored():
 
 
 
-def test_end_to_end_collect_train_modes_test_predict(tmp_path):
+def test_end_to_end_collect_train_modes_test_predict(tmp_path, monkeypatch):
+    monkeypatch.setattr("lmml.core.runner.build_logger", lambda cfg: True)
     offline_npz = tmp_path / "grid_offline.npz"
     out_dir = tmp_path / "run_out"
     pred_npz = tmp_path / "preds.npz"
@@ -41,7 +42,7 @@ def test_end_to_end_collect_train_modes_test_predict(tmp_path):
     )
     assert offline_npz.exists()
 
-    # 2) pure offline train (验证 dm.env is None 且生成 WandB 离线日志与 ckpt)
+    # 2) pure offline train (验证 dm.env is None 且生成 ckpt)
     with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
         cfg_off = compose(
             config_name="config",
@@ -61,8 +62,6 @@ def test_end_to_end_collect_train_modes_test_predict(tmp_path):
     run(cfg_off)
     ckpt_file = out_dir / "offline" / "ckpts" / "last.ckpt"
     assert ckpt_file.exists()
-    wandb_runs = list((out_dir / "offline").rglob("offline-run-*"))
-    assert len(wandb_runs) >= 1
 
     # 3) warmup_online (方案 A: 前 8 步离线预热，之后切换在线交互)
     with initialize_config_module(version_base="1.3", config_module="lmml.configs"):

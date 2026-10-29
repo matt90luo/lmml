@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import uuid
@@ -26,7 +27,7 @@ from lmml.datas.llm.sft import (
 
 console = Console()
 
-PREPARE_TASKS = ("sft", "dpo", "ppo")
+PREPARE_TASKS = ("pretrain", "sft", "dpo", "ppo", "grpo", "agent_rl")
 
 
 def _normalize_messages(value: Any, *, default_role: str | None = None) -> list[dict[str, str]]:
@@ -57,7 +58,7 @@ def _normalize_messages(value: Any, *, default_role: str | None = None) -> list[
 
 
 def _normalize_prompt(item: dict[str, Any]) -> list[dict[str, str]]:
-    for key in ("prompt", "messages", "query", "instruction"):
+    for key in ("prompt", "messages", "conversations", "query", "instruction"):
         value = item.get(key)
         messages = _normalize_messages(value, default_role="user")
         if not messages:
@@ -165,17 +166,202 @@ def encode_chatml_prompt(
     chat_start_token: str = DEFAULT_CHAT_START_TOKEN,
     chat_end_token: str = DEFAULT_CHAT_END_TOKEN,
 ) -> dict[str, Any] | None:
-    """编码 PPO 生成 prompt，并追加 assistant 起始标记。"""
-    input_ids: list[int] = []
-    for message in messages:
-        text = f"{chat_start_token}{message['role']}\n{message['content']}{chat_end_token}\n"
-        input_ids.extend(tokenizer.encode(text, add_special_tokens=False))
-    assistant_prefix = f"{chat_start_token}assistant\n"
-    input_ids.extend(tokenizer.encode(assistant_prefix, add_special_tokens=False))
+    """编码 RL 生成 prompt；优先使用 tokenizer 自带的 ChatML/CoT 模板。"""
+    rendered = _render_chat_prompt(messages, tokenizer, add_generation_prompt=True)
+    input_ids = tokenizer.encode(rendered, add_special_tokens=False)
     input_ids = input_ids[:max_length]
     if len(input_ids) < 2:
         return None
     return {"input_ids": input_ids, "prompt_length": len(input_ids), "length": len(input_ids)}
+
+
+def _coerce_messages(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(decoded, list):
+            return [item for item in decoded if isinstance(item, dict)]
+    return []
+
+
+def _normalize_agent_message(message: dict[str, Any]) -> dict[str, Any] | None:
+    role = str(message.get("role") or message.get("from") or "user").strip().lower()
+    if role in {"human", "user"}:
+        role = "user"
+    elif role in {"gpt", "model", "assistant", "bot"}:
+        role = "assistant"
+    elif role in {"tool", "function", "observation", "tool_response"}:
+        role = "tool"
+    content = message.get("content")
+    if content is None:
+        content = message.get("value")
+    out: dict[str, Any] = {"role": role, "content": str(content or "")}
+    for key in ("tools", "tool_calls", "tool_call_id"):
+        if key in message:
+            out[key] = message[key]
+    return out if out["content"] or out["role"] == "assistant" else None
+
+
+def _render_chat_prompt(
+    messages: list[dict[str, Any]],
+    tokenizer: Any,
+    *,
+    add_generation_prompt: bool = True,
+) -> str:
+    if getattr(tokenizer, "chat_template", None):
+        try:
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+            )
+        except (TypeError, ValueError, KeyError):
+            pass
+    pieces = []
+    for message in messages:
+        role = "user" if message.get("role") == "tool" else message.get("role", "user")
+        pieces.append(
+            f"{DEFAULT_CHAT_START_TOKEN}{role}\n{message.get('content', '')}{DEFAULT_CHAT_END_TOKEN}\n"
+        )
+    if add_generation_prompt:
+        pieces.append(f"{DEFAULT_CHAT_START_TOKEN}assistant\n")
+    return "".join(pieces)
+
+
+def normalize_pretrain_batch(batch: dict[str, list[Any]]) -> dict[str, list[str]]:
+    """Normalize plain-text pretraining rows and discard empty documents."""
+    keys = list(batch.keys())
+    if not keys:
+        return {"text": []}
+    texts: list[str] = []
+    for index in range(len(batch[keys[0]])):
+        row = {key: batch[key][index] for key in keys}
+        text = row.get("text")
+        if text is None:
+            text = row.get("content")
+        if text is None:
+            text = row.get("document")
+        text = str(text or "").strip()
+        if text:
+            texts.append(text)
+    return {"text": texts}
+
+
+def tokenize_pretrain_batch(
+    batch: dict[str, list[Any]],
+    *,
+    tokenizer: Any,
+    max_length: int = 512,
+) -> dict[str, list[Any]]:
+    """Tokenize raw text with MiniMind-style BOS/EOS and ignore-index padding."""
+    output: dict[str, list[Any]] = {"input_ids": [], "labels": [], "length": []}
+    bos_id = int(tokenizer.bos_token_id)
+    eos_id = int(tokenizer.eos_token_id)
+    for text in batch.get("text", []):
+        tokens = tokenizer(
+            str(text),
+            add_special_tokens=False,
+            truncation=True,
+            max_length=max(0, int(max_length) - 2),
+        ).input_ids
+        ids = [bos_id, *tokens, eos_id]
+        output["input_ids"].append(ids)
+        output["labels"].append(list(ids))
+        output["length"].append(len(ids))
+    return output
+
+
+def normalize_agent_rl_batch(batch: dict[str, list[Any]]) -> dict[str, list[Any]]:
+    """Normalize agent prompt conversations, tool definitions and GT answers."""
+    keys = list(batch.keys())
+    if not keys:
+        return {"messages": [], "tools": [], "gt": []}
+    messages_out: list[list[dict[str, str]]] = []
+    tools_out: list[list[dict[str, Any]]] = []
+    gt_out: list[list[str]] = []
+    for index in range(len(batch[keys[0]])):
+        row = {key: batch[key][index] for key in keys}
+        raw_messages = row.get("messages") or row.get("conversations")
+        messages = [
+            message
+            for raw in _coerce_messages(raw_messages)
+            if (message := _normalize_agent_message(raw)) is not None
+        ]
+        messages = [
+            {"role": "user" if message["role"] == "tool" else message["role"], "content": message["content"]}
+            for message in messages
+        ]
+        if not messages:
+            continue
+        tools: Any = row.get("tools")
+        if tools is None:
+            for message in messages:
+                if message.get("role") == "system" and message.get("tools"):
+                    tools = message["tools"]
+                    break
+        if isinstance(tools, str):
+            try:
+                tools = json.loads(tools)
+            except json.JSONDecodeError:
+                tools = []
+        if isinstance(tools, dict):
+            tools = [tools]
+        if not isinstance(tools, list):
+            tools = []
+        gt = row.get("gt", [])
+        if isinstance(gt, str):
+            gt = [gt]
+        gt = [str(item) for item in (gt or []) if str(item).strip()]
+        # The last assistant turn is the target; prompts exclude it.
+        prompt_messages = messages[:-1] if messages[-1].get("role") == "assistant" else messages
+        if not prompt_messages:
+            continue
+        messages_out.append(
+            [
+                {key: value for key, value in message.items() if key in {"role", "content"}}
+                for message in prompt_messages
+            ]
+        )
+        tools_out.append(tools)
+        gt_out.append(gt)
+    return {"messages": messages_out, "tools": tools_out, "gt": gt_out}
+
+
+def tokenize_agent_rl_batch(
+    batch: dict[str, list[Any]],
+    *,
+    tokenizer: Any,
+    max_length: int = 2048,
+    chat_start_token: str = DEFAULT_CHAT_START_TOKEN,
+    chat_end_token: str = DEFAULT_CHAT_END_TOKEN,
+) -> dict[str, list[Any]]:
+    """Prepare plain prompt text and retain tools/gt for online rollouts."""
+    output: dict[str, list[Any]] = {
+        "prompt": [],
+        "messages_json": [],
+        "tools_json": [],
+        "gt": [],
+        "input_ids": [],
+        "length": [],
+    }
+    for messages, tools, gt in zip(
+        batch.get("messages", []), batch.get("tools", []), batch.get("gt", [])
+    ):
+        prompt = _render_chat_prompt(messages, tokenizer, add_generation_prompt=True)
+        ids = tokenizer.encode(prompt, add_special_tokens=False)[: int(max_length)]
+        if len(ids) < 2:
+            continue
+        output["prompt"].append(prompt)
+        output["messages_json"].append(json.dumps(messages, ensure_ascii=False))
+        output["tools_json"].append(json.dumps(tools, ensure_ascii=False))
+        output["gt"].append(gt)
+        output["input_ids"].append(ids)
+        output["length"].append(len(ids))
+    return output
 
 
 def tokenize_ppo_batch(
@@ -187,8 +373,14 @@ def tokenize_ppo_batch(
     chat_end_token: str = DEFAULT_CHAT_END_TOKEN,
 ) -> dict[str, list[Any]]:
     """批量编码 PPO prompt。"""
-    output: dict[str, list[Any]] = {"input_ids": [], "prompt_length": [], "length": []}
+    output: dict[str, list[Any]] = {
+        "prompt": [],
+        "input_ids": [],
+        "prompt_length": [],
+        "length": [],
+    }
     for messages in batch.get("prompt", []):
+        prompt_text = _render_chat_prompt(messages, tokenizer, add_generation_prompt=True)
         encoded = encode_chatml_prompt(
             messages=messages,
             tokenizer=tokenizer,
@@ -198,6 +390,7 @@ def tokenize_ppo_batch(
         )
         if encoded is None:
             continue
+        output["prompt"].append(prompt_text)
         output["input_ids"].append(encoded["input_ids"])
         output["prompt_length"].append(encoded["prompt_length"])
         output["length"].append(encoded["length"])
@@ -251,9 +444,12 @@ def _apply_subsampling(dataset: HFDataset, config: dict[str, Any], seed: int) ->
 def _validate_task_columns(batch: dict[str, list[Any]], task: str) -> None:
     """在 map 前校验任务必需字段，避免所有源都被静默过滤后才发现配置错误。"""
     required = {
+        "pretrain": {"text", "content", "document"},
         "sft": set(),
         "dpo": {"chosen", "rejected"},
-        "ppo": {"prompt", "messages", "query", "instruction"},
+        "ppo": {"prompt", "messages", "conversations", "query", "instruction"},
+        "grpo": {"prompt", "messages", "conversations", "query", "instruction"},
+        "agent_rl": {"messages", "conversations"},
     }[task]
     if required and not required.intersection(batch):
         raise ValueError(f"data.task={task} 需要数据源包含字段之一: {sorted(required)}")
@@ -329,6 +525,9 @@ def prepare_llm_dataset(
     chat_end_token: str = DEFAULT_CHAT_END_TOKEN,
     ignore_index: int = DEFAULT_IGNORE_INDEX,
     drop_no_target: bool = True,
+    wrap_reasoning: bool = False,
+    add_system_ratio: float = 0.0,
+    empty_think_remove_ratio: float = 0.0,
     seed: int = 42,
 ) -> dict[str, Any]:
     """构建 SFT / DPO / PPO 的预分词 DatasetDict 并持久化到输出目录。"""
@@ -352,7 +551,11 @@ def prepare_llm_dataset(
         "chat_start_token": str(chat_start_token),
         "chat_end_token": str(chat_end_token),
     }
-    if task == "sft":
+    if task == "pretrain":
+        normalize_fn = normalize_pretrain_batch
+        tokenize_fn = tokenize_pretrain_batch
+        tokenize_fn_kwargs = {"tokenizer": tokenizer, "max_length": int(max_length)}
+    elif task == "sft":
         normalize_fn = normalize_sft_batch
         tokenize_fn = tokenize_sft_batch
         tokenize_fn_kwargs.update(ignore_index=int(ignore_index), drop_no_target=bool(drop_no_target))
@@ -360,6 +563,9 @@ def prepare_llm_dataset(
         normalize_fn = normalize_dpo_batch
         tokenize_fn = tokenize_dpo_batch
         tokenize_fn_kwargs.update(ignore_index=int(ignore_index), drop_no_target=bool(drop_no_target))
+    elif task == "agent_rl":
+        normalize_fn = normalize_agent_rl_batch
+        tokenize_fn = tokenize_agent_rl_batch
     else:
         normalize_fn = normalize_ppo_batch
         tokenize_fn = tokenize_ppo_batch
@@ -387,12 +593,19 @@ def prepare_llm_dataset(
                 dataset, sampled_len = _apply_subsampling(dataset, config, int(seed))
                 if len(dataset) > 0:
                     _validate_task_columns({name: dataset[:1][name] for name in dataset.column_names}, task)
+                normalize_kwargs = {
+                    "wrap_reasoning": bool(wrap_reasoning),
+                    "add_system_ratio": float(add_system_ratio),
+                    "empty_think_remove_ratio": float(empty_think_remove_ratio),
+                    "seed": int(seed),
+                } if task == "sft" else {}
                 dataset = dataset.map(
                     normalize_fn,
                     batched=True,
                     batch_size=1000,
                     remove_columns=dataset.column_names,
                     num_proc=num_proc,
+                    fn_kwargs=normalize_kwargs,
                     desc=f"Normalizing {source_name}",
                 )
                 dataset = dataset.map(

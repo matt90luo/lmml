@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - override /recipe: causal_lm_ppo
+  - override /algo: minimind_ppo
+  - override /data: minimind_rlaif
+  - override /trainer: colab_rl
+  - override /net: null
+  - override /env: null
+  - override /collect: null
+
+optimized_metric: train/loss
+eval:
+  enabled: false
+callbacks:
+  checkpoint:
+    dirpath: ${paths.base_dir}/checkpoints_minimind3_ppo
+    filename: minimind3-ppo-{step:06d}
+    monitor: train/loss
+    mode: min
+    save_top_k: 1
+    save_last: true
+    save_weights_only: false
+logger:
+  project: lmml-projects
+  name: minimind3-ppo
+  tags: [llm, minimind, minimind3_ppo]

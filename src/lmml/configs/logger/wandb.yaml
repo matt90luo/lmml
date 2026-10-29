@@ -1,3 +1,4 @@
+enabled: true
 project: lmml-projects
 name: null
 save_dir: ${hydra:runtime.output_dir}

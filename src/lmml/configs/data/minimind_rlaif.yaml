@@ -1,0 +1,18 @@
+task: ppo
+prepared_path: ${paths.prepared_data_dir}/minimind_rlaif
+overwrite: true
+tokenizer_name_or_path: ${algo.model.name_or_path}
+sources:
+  - path: ${paths.base_data_dir}/minimind_dataset/rlaif.jsonl
+    max_samples: null
+    sample_ratio: 1.0
+max_length: 768
+batch_size: 2
+val_batch_size: 2
+num_workers: 0
+preprocessing_num_proc: auto
+val_split_ratio: 0.01
+max_val_samples: 100
+chat_start_token: "<|im_start|>"
+chat_end_token: "<|im_end|>"
+thinking_ratio: 0.9

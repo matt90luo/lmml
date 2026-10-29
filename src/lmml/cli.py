@@ -33,6 +33,13 @@ Examples:
   lmml train experiment=qwen35_full_sft
   lmml train experiment=qwen35_lora_sft paths.base_data_dir=/content/data trainer.max_epochs=1
 
+  # MiniMind-3 Dense / MoE (pretrain, SFT, DPO, PPO, GRPO/CISPO, Agent RL)
+  lmml data experiment=minimind3_full_sft
+  lmml train experiment=minimind3_pretrain
+  lmml train experiment=minimind3_full_sft
+  lmml train experiment=minimind3_grpo
+  lmml train experiment=minimind3_moe_agent_rl
+
   # RL (Rainbow DQN)
   lmml train experiment=rainbow_gridworld_online
   lmml train data=offline data.offline_path=data/grid.npz net=transformer

@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - minimind3_dpo
+  - _self_
+algo:
+  model:
+    name_or_path: ${paths.base_dir}/minimind3_moe_sft_final
+    config:
+      use_moe: true
+      num_experts: 4
+  export:
+    save_dir: ${paths.base_dir}/minimind3_moe_dpo_final
+logger:
+  name: minimind3-moe-dpo

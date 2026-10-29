@@ -1,0 +1,33 @@
+lr: 3.0e-7
+critic_lr: 5.0e-7
+gamma: 1.0
+lam: 0.95
+clip_epsilon: 0.2
+value_clip: 0.2
+vf_coef: 0.5
+kl_coef: 0.02
+update_iters: 2
+mini_batch_size: 1
+max_new_tokens: 1024
+reward_mode: rule_only
+reward_model_path: null
+matmul_precision: high
+model:
+  name_or_path: ${paths.base_dir}/minimind3_sft_final
+  architecture: minimind
+  init_mode: pretrained
+  torch_dtype: bfloat16
+  trust_remote_code: true
+  config:
+    hidden_size: 768
+    num_hidden_layers: 8
+    num_attention_heads: 8
+    num_key_value_heads: 4
+    head_dim: 96
+    intermediate_size: 2432
+    vocab_size: 6400
+    max_position_embeddings: 32768
+    use_moe: false
+export:
+  enabled: true
+  save_dir: ${paths.base_dir}/minimind3_ppo_final

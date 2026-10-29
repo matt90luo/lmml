@@ -78,6 +78,9 @@ def run_data(cfg: DictConfig) -> dict:
         chat_end_token=chat_end,
         ignore_index=int(data.get("ignore_index", -100)),
         drop_no_target=bool(data.get("drop_no_target", True)),
+        wrap_reasoning=bool(data.get("wrap_reasoning", False)),
+        add_system_ratio=float(data.get("add_system_ratio", 0.0)),
+        empty_think_remove_ratio=float(data.get("empty_think_remove_ratio", 0.0)),
         seed=int(cfg.seed),
     )
     console.print(f"[bold green][lmml data][/bold green] summary: {summary}")

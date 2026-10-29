@@ -211,3 +211,116 @@ def create_tiny_qwen_model_and_tokenizer(
         encoding="utf-8",
     )
     return out_dir
+
+
+def create_tiny_minimind_model_and_tokenizer(
+    save_dir: str | Path,
+    hidden_size: int = 32,
+    intermediate_size: int = 64,
+    num_hidden_layers: int = 1,
+    num_attention_heads: int = 4,
+    num_key_value_heads: int = 2,
+    use_moe: bool = False,
+    num_experts: int = 2,
+    max_position_embeddings: int = 256,
+) -> Path:
+    """Create an offline MiniMind checkpoint with the bundled 6400-token tokenizer."""
+    import shutil
+    from importlib.resources import as_file, files
+
+    from lmml.models.llm.minimind import MiniMindConfig, MiniMindForCausalLM
+    from lmml.models.llm.minimind_registration import register_minimind
+
+    register_minimind()
+    out_dir = Path(save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with as_file(files("lmml").joinpath("assets", "minimind")) as asset_dir:
+        for name in ("tokenizer.json", "tokenizer_config.json"):
+            shutil.copy2(asset_dir / name, out_dir / name)
+    config = MiniMindConfig(
+        vocab_size=6400,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_key_value_heads,
+        head_dim=hidden_size // num_attention_heads,
+        max_position_embeddings=max_position_embeddings,
+        use_moe=use_moe,
+        num_experts=num_experts,
+        moe_intermediate_size=intermediate_size,
+        tie_word_embeddings=True,
+    )
+    MiniMindForCausalLM(config).save_pretrained(str(out_dir), safe_serialization=True)
+    return out_dir
+
+
+def create_synthetic_minimind_datasets(
+    root: str | Path,
+    samples_per_task: int = 8,
+) -> dict[str, Path]:
+    """Create small pretrain/SFT/DPO/RLAIF/Agent JSONL fixtures."""
+    base = Path(root)
+    base.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "pretrain": base / "pretrain.jsonl",
+        "sft": base / "sft.jsonl",
+        "dpo": base / "dpo.jsonl",
+        "rlaif": base / "rlaif.jsonl",
+        "agent_rl": base / "agent_rl.jsonl",
+    }
+    tools = [{"type": "function", "function": {"name": "calculate_math"}}]
+    with (
+        paths["pretrain"].open("w", encoding="utf-8") as pretrain,
+        paths["sft"].open("w", encoding="utf-8") as sft,
+        paths["dpo"].open("w", encoding="utf-8") as dpo,
+        paths["rlaif"].open("w", encoding="utf-8") as rlaif,
+        paths["agent_rl"].open("w", encoding="utf-8") as agent,
+    ):
+        for index in range(samples_per_task):
+            pretrain.write(json.dumps({"text": f"Document {index}: MiniMind learns language modeling."}, ensure_ascii=False) + "\n")
+            sft.write(
+                json.dumps(
+                    {
+                        "conversations": [
+                            {"role": "user", "content": f"What is {index}+2?"},
+                            {"role": "assistant", "reasoning_content": "Add the numbers.", "content": str(index + 2)},
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            dpo.write(
+                json.dumps(
+                    {
+                        "prompt": f"Answer question {index}",
+                        "chosen": f"<think>\nReason carefully.\n</think>\n\nAnswer {index}.",
+                        "rejected": "I do not know.",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            rlaif.write(
+                json.dumps(
+                    {"conversations": [{"role": "user", "content": f"Explain concept {index}"}, {"role": "assistant", "content": "A useful explanation."}]},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            agent.write(
+                json.dumps(
+                    {
+                        "conversations": [
+                            {"role": "system", "content": "Use tools.", "tools": tools},
+                            {"role": "user", "content": f"Calculate {index}+2"},
+                            {"role": "assistant", "content": str(index + 2)},
+                        ],
+                        "gt": [str(index + 2)],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    return paths

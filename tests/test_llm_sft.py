@@ -18,6 +18,7 @@ from lmml.datas.llm import (
     create_synthetic_sft_datasets,
     create_tiny_qwen_model_and_tokenizer,
     encode_chatml_messages,
+    normalize_item_format,
     normalize_sft_batch,
     prepare_llm_dataset,
 )
@@ -165,6 +166,96 @@ def test_sft_normalization_tokenization_and_prepared_datamodule(tmp_path):
         seed=42,
     )
     assert overwritten["overwritten"] is True
+
+
+def test_hermes_tool_calling_and_cot_normalization():
+    hermes_item = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the current weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+        "conversations": [
+            {"from": "system", "value": "You are a function calling assistant."},
+            {"from": "human", "value": "What is the weather in Shanghai?"},
+            {
+                "from": "gpt",
+                "tool_calls": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city": "Shanghai"}',
+                        },
+                    }
+                ],
+            },
+            {"from": "tool", "value": '{"temperature": 24}'},
+            {"from": "gpt", "value": "It is 24 degrees Celsius in Shanghai."},
+        ],
+    }
+    messages = normalize_item_format(hermes_item)
+    assert [message["role"] for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert "<tools>" in messages[0]["content"]
+    assert "get_weather" in messages[0]["content"]
+    assert "<tool_call>" in messages[2]["content"]
+    assert '"name": "get_weather"' in messages[2]["content"]
+    assert '"city": "Shanghai"' in messages[2]["content"]
+    assert "<tool_response>" in messages[3]["content"]
+    assert messages[4]["content"] == "It is 24 degrees Celsius in Shanghai."
+
+    class RecordingTokenizer:
+        def __init__(self):
+            self.texts: list[str] = []
+
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            del add_special_tokens
+            self.texts.append(text)
+            return [len(self.texts)]
+
+    tokenizer = RecordingTokenizer()
+    encoded_tool_turn = encode_chatml_messages(
+        messages=messages[2:4],
+        tokenizer=tokenizer,
+        max_length=512,
+    )
+    assert encoded_tool_turn is not None
+    assert "<|im_start|>assistant\n" in tokenizer.texts
+    assert "<|im_start|>user\n" in tokenizer.texts
+    assert "<|im_start|>tool\n" not in tokenizer.texts
+
+    cot_item = {
+        "question": "What is 6 * 7?",
+        "reasoning_content": "Compute 6 groups of 7.",
+        "answer": "42",
+    }
+    cot_messages = normalize_item_format(cot_item)
+    assert cot_messages[-1] == {
+        "role": "assistant",
+        "content": "Compute 6 groups of 7.\n\n42",
+    }
+
+
+def test_qwen_sft_mix_includes_hermes_source():
+    with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
+        cfg = compose(config_name="config", overrides=["experiment=qwen35_lora_sft"])
+    source_paths = [str(source.path) for source in cfg.data.sources]
+    assert any(path.endswith("/hermes-function-calling-v1") for path in source_paths)
 
 
 @pytest.mark.parametrize("task", ["dpo", "ppo"])

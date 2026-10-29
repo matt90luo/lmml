@@ -4,11 +4,15 @@ from lmml.datas.llm.prepare import (
     PREPARE_TASKS,
     encode_chatml_prompt,
     load_prepared_dataset,
+    normalize_agent_rl_batch,
     normalize_dpo_batch,
     normalize_ppo_batch,
+    normalize_pretrain_batch,
     prepare_llm_dataset,
+    tokenize_agent_rl_batch,
     tokenize_dpo_batch,
     tokenize_ppo_batch,
+    tokenize_pretrain_batch,
 )
 from lmml.datas.llm.sft import (
     DynamicPadCollator,
@@ -22,28 +26,40 @@ from lmml.datas.llm.sft import (
     tokenize_sft_batch,
 )
 from lmml.datas.llm.synthetic import (
+    create_synthetic_minimind_datasets,
     create_synthetic_sft_datasets,
+    create_tiny_minimind_model_and_tokenizer,
     create_tiny_qwen_model_and_tokenizer,
 )
+from lmml.datas.llm.tasks import DPODataModule, PretrainDataModule, RLPromptDataModule
 
 __all__ = [
     "PREPARE_TASKS",
+    "DPODataModule",
     "DynamicPadCollator",
     "LengthGroupedSampler",
+    "PretrainDataModule",
+    "RLPromptDataModule",
     "StandardSFTDataset",
     "UnifiedSFTDataModule",
     "build_sft_tokenizer",
+    "create_synthetic_minimind_datasets",
     "create_synthetic_sft_datasets",
+    "create_tiny_minimind_model_and_tokenizer",
     "create_tiny_qwen_model_and_tokenizer",
     "encode_chatml_messages",
     "encode_chatml_prompt",
     "load_prepared_dataset",
+    "normalize_agent_rl_batch",
     "normalize_dpo_batch",
     "normalize_item_format",
     "normalize_ppo_batch",
+    "normalize_pretrain_batch",
     "normalize_sft_batch",
     "prepare_llm_dataset",
+    "tokenize_agent_rl_batch",
     "tokenize_dpo_batch",
     "tokenize_ppo_batch",
+    "tokenize_pretrain_batch",
     "tokenize_sft_batch",
 ]

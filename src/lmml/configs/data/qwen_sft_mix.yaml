@@ -13,6 +13,11 @@ sources:
   - path: ${paths.base_data_dir}/OpenR1-Math-220k
     max_samples: 25000
     sample_ratio: null
+  # Hermes 的函数调用样本会保留 tools / tool_call / tool_response，
+  # 并统一转换为 Qwen ChatML 工具调用格式。
+  - path: ${paths.base_data_dir}/hermes-function-calling-v1
+    max_samples: null
+    sample_ratio: 1.0
 
 max_length: 2048
 batch_size: 4

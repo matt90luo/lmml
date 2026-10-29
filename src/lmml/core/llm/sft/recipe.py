@@ -31,12 +31,33 @@ class CausalLMSFTRecipe(Recipe):
         matmul_prec = str(cfg.algo.get("matmul_precision", "high"))
         torch.set_float32_matmul_precision(matmul_prec)
 
-    def build_datamodule(self) -> UnifiedSFTDataModule:
+    def build_datamodule(self) -> UnifiedSFTDataModule | Any:
         cfg = self.cfg
         algo = cfg.algo
         data = cfg.data
         model_cfg = algo.model
         pred_cfg = cfg.get("predict") or {}
+        if str(data.get("task", "sft")).lower() == "pretrain":
+            from lmml.datas.llm.tasks import PretrainDataModule
+
+            tokenizer = build_sft_tokenizer(
+                model_name_or_path=str(data.get("tokenizer_name_or_path") or model_cfg.name_or_path),
+                chat_end_token=str(data.get("chat_end_token", "<|im_end|>")),
+                trust_remote_code=bool(model_cfg.get("trust_remote_code", True)),
+            )
+            datamodule = PretrainDataModule(
+                prepared_path=str(data.prepared_path),
+                pad_token_id=int(tokenizer.pad_token_id),
+                batch_size=int(data.get("batch_size", 8)),
+                val_batch_size=int(data.get("val_batch_size", data.get("batch_size", 8))),
+                max_length=int(data.get("max_length", 512)),
+                num_workers=int(data.get("num_workers", 4)),
+                group_by_length=bool(data.get("group_by_length", True)),
+                pad_to_multiple_of=data.get("pad_to_multiple_of", 8),
+                seed=int(cfg.seed),
+            )
+            datamodule.tokenizer = tokenizer
+            return datamodule
 
         chat_start = str(data.get("chat_start_token", "<|im_start|>"))
         chat_end = str(data.get("chat_end_token", "<|im_end|>"))
@@ -73,9 +94,43 @@ class CausalLMSFTRecipe(Recipe):
             seed=int(cfg.seed),
         )
 
+    def _model_config(self) -> dict[str, Any]:
+        raw = self.cfg.algo.model.get("config")
+        config = OmegaConf.to_container(raw, resolve=True) if raw is not None else {}
+        config = dict(config or {})
+        for key in (
+            "architecture",
+            "init_mode",
+            "checkpoint_path",
+        ):
+            if self.cfg.algo.model.get(key) is not None:
+                config[key] = self.cfg.algo.model.get(key)
+        architecture = str(config.get("architecture") or "auto").lower()
+        init_mode = str(config.get("init_mode") or "pretrained").lower()
+        if (architecture == "minimind" or init_mode == "scratch") and "config" not in config:
+            nested = {
+                key: value
+                for key, value in config.items()
+                if key
+                not in {
+                    "architecture",
+                    "init_mode",
+                    "checkpoint_path",
+                    "name_or_path",
+                }
+            }
+            if nested:
+                config = {
+                    "architecture": "minimind",
+                    "init_mode": init_mode,
+                    "checkpoint_path": config.get("checkpoint_path"),
+                    "config": nested,
+                }
+        return config
+
     def build_module(
         self,
-        datamodule: UnifiedSFTDataModule,
+        datamodule: UnifiedSFTDataModule | Any,
         ckpt_path: str | None = None,
     ) -> CausalLMSFTLightningModule:
         cfg = self.cfg
@@ -110,6 +165,7 @@ class CausalLMSFTRecipe(Recipe):
             lora_dropout=float(lora_cfg.get("dropout", 0.05)),
             lora_target_modules=target_modules,
             max_new_tokens=int(algo.get("max_new_tokens", 128)),
+            model_config=self._model_config(),
         )
 
         if ckpt_path and os.path.isfile(ckpt_path):
@@ -121,7 +177,7 @@ class CausalLMSFTRecipe(Recipe):
     def adapt_trainer_kwargs(
         self,
         trainer_kwargs: dict[str, Any],
-        datamodule: UnifiedSFTDataModule,
+        datamodule: UnifiedSFTDataModule | Any,
     ) -> dict[str, Any]:
         """当 val_check_interval 为整数且大于单轮总 batch 数时自动钳制，防止小样本调试报错。"""
         adapted = dict(trainer_kwargs)
@@ -139,7 +195,7 @@ class CausalLMSFTRecipe(Recipe):
                     adapted["val_check_interval"] = num_batches
         return adapted
 
-    def build_callbacks(self, datamodule: UnifiedSFTDataModule) -> list[pl.Callback]:
+    def build_callbacks(self, datamodule: UnifiedSFTDataModule | Any) -> list[pl.Callback]:
         cb_cfg = self.cfg.get("callbacks") or {}
         ckpt_cfg = cb_cfg.get("checkpoint") or {}
         mode = str(self.cfg.algo.get("mode", "lora")).strip().lower()
@@ -176,7 +232,7 @@ class CausalLMSFTRecipe(Recipe):
         self,
         trainer: pl.Trainer,
         module: CausalLMSFTLightningModule,
-        datamodule: UnifiedSFTDataModule,
+        datamodule: UnifiedSFTDataModule | Any,
     ) -> None:
         export_cfg = self.cfg.algo.get("export") or {}
         if not bool(export_cfg.get("enabled", True)):

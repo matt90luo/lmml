@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator, Sequence
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,20 @@ console = Console()
 DEFAULT_CHAT_START_TOKEN = "<|im_start|>"
 DEFAULT_CHAT_END_TOKEN = "<|im_end|>"
 DEFAULT_IGNORE_INDEX = -100
+
+_USER_ROLES = {"human", "user"}
+_SYSTEM_ROLES = {"system", "developer"}
+_TOOL_ROLES = {"tool", "function", "observation", "tool_response", "ipython"}
+_ASSISTANT_ROLES = {"assistant", "gpt", "model", "bot"}
+_REASONING_KEYS = ("reasoning_content", "reasoning", "chain_of_thought", "cot")
+_TOOL_VALUE_KEYS = ("tools", "functions", "available_tools", "tool_definitions")
+_PROMPT_PAIR_KEYS = (
+    ("instruction", "output"),
+    ("question", "response"),
+    ("question", "answer"),
+    ("problem", "solution"),
+    ("prompt", "response"),
+)
 
 
 def resolve_num_proc(num_proc: int | str | None) -> int | None:
@@ -45,11 +61,19 @@ def build_sft_tokenizer(
     chat_end_token: str = DEFAULT_CHAT_END_TOKEN,
     trust_remote_code: bool = True,
 ) -> PreTrainedTokenizerBase:
-    """加载并标准化 Qwen / ChatML 分词器（同步 <|im_end|> 为 EOS，右侧 Padding）。"""
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name_or_path,
-        trust_remote_code=trust_remote_code,
-    )
+    """加载并标准化 ChatML 分词器；MiniMind 路径缺失时回退到内置词表。"""
+    tokenizer_source = str(model_name_or_path)
+    if not Path(tokenizer_source).exists() and "minimind" in tokenizer_source.lower():
+        bundled = files("lmml").joinpath("assets", "minimind")
+        with as_file(bundled) as bundled_path:
+            tokenizer = AutoTokenizer.from_pretrained(
+                str(bundled_path), trust_remote_code=trust_remote_code
+            )
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_source,
+            trust_remote_code=trust_remote_code,
+        )
     im_end_id = tokenizer.convert_tokens_to_ids(chat_end_token)
     if isinstance(im_end_id, int) and im_end_id != getattr(tokenizer, "unk_token_id", None):
         tokenizer.eos_token = chat_end_token
@@ -60,66 +84,211 @@ def build_sft_tokenizer(
     return tokenizer
 
 
-def normalize_item_format(item: dict[str, Any]) -> list[dict[str, str]]:
-    """将不同开源数据集的单条样本统一转换为 [{'role': '...', 'content': '...'}]。"""
-    raw_msgs = (
-        item.get("messages")
-        if isinstance(item.get("messages"), list)
-        else (item.get("conversations") if isinstance(item.get("conversations"), list) else None)
-    )
-    if raw_msgs:
-        mapped: list[dict[str, str]] = []
-        for m in raw_msgs:
-            if not isinstance(m, dict):
-                continue
-            raw_role = m.get("role") or m.get("from") or "user"
-            if raw_role in ("human", "user"):
-                role = "user"
-            elif raw_role == "system":
-                role = "system"
-            else:
-                role = "assistant"
-            content = m.get("content") if m.get("content") is not None else m.get("value", "")
-            if content is not None and str(content).strip() != "":
-                mapped.append({"role": role, "content": str(content)})
-        if any(m["role"] == "assistant" for m in mapped):
-            return mapped
+def _stringify(value: Any) -> str:
+    """将字符串、JSON 对象或数组稳定转换为可写入 ChatML 文本的内容。"""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, indent=2)
+    return str(value).strip()
 
-    if item.get("instruction") is not None and item.get("output") is not None:
-        inst = str(item["instruction"]).strip()
-        out = str(item["output"]).strip()
-        if inst and out:
-            prompt = inst
-            inp = item.get("input")
-            if inp is not None and str(inp).strip() != "":
-                prompt = f"{prompt}\n{inp}"
-            return [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": out},
-            ]
 
-    if item.get("question") is not None and item.get("response") is not None:
-        q = str(item["question"]).strip()
-        r = str(item["response"]).strip()
-        if q and r:
-            return [
-                {"role": "user", "content": q},
-                {"role": "assistant", "content": r},
-            ]
+def _first_text(item: dict[str, Any], keys: Sequence[str]) -> str:
+    for key in keys:
+        text = _stringify(item.get(key))
+        if text:
+            return text
+    return ""
 
-    if item.get("problem") is not None and item.get("solution") is not None:
-        p = str(item["problem"]).strip()
-        s = str(item["solution"]).strip()
-        if p and s:
-            return [
-                {"role": "user", "content": p},
-                {"role": "assistant", "content": s},
-            ]
 
+def _coerce_message_list(value: Any) -> list[dict[str, Any]]:
+    """兼容 messages/conversations 为列表或 JSON 字符串的数据源。"""
+    if isinstance(value, list):
+        return [message for message in value if isinstance(message, dict)]
+    if isinstance(value, str) and value.strip():
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(decoded, list):
+            return [message for message in decoded if isinstance(message, dict)]
     return []
 
 
-def normalize_sft_batch(batch: dict[str, list[Any]]) -> dict[str, list[list[dict[str, str]]]]:
+def _format_tool_calls(value: Any) -> str:
+    """将 Hermes/OpenAI 风格的 tool_calls 统一为 Qwen ChatML 的 tool_call 标签。"""
+    if value is None:
+        return ""
+    calls = value if isinstance(value, list) else [value]
+    blocks: list[str] = []
+    for call in calls:
+        normalized = call
+        if isinstance(call, dict) and isinstance(call.get("function"), dict):
+            function = call["function"]
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    pass
+            normalized = {"name": function.get("name", ""), "arguments": arguments}
+        text = _stringify(normalized)
+        if not text or "<tool_call>" in text:
+            continue
+        blocks.append(f"<tool_call>\n{text}\n</tool_call>")
+    return "\n".join(blocks)
+
+
+def _normalize_role(raw_role: Any) -> str:
+    role = str(raw_role or "user").strip().lower()
+    if role in _USER_ROLES:
+        return "user"
+    if role in _SYSTEM_ROLES:
+        return "system"
+    if role in _TOOL_ROLES:
+        return "tool"
+    if role in _ASSISTANT_ROLES or role in {"assistant", "gpt"}:
+        return "assistant"
+    return "assistant"
+
+
+def _normalize_message(
+    message: dict[str, Any],
+    *,
+    wrap_reasoning: bool = False,
+) -> dict[str, str] | None:
+    role = _normalize_role(message.get("role") or message.get("from"))
+    content = _stringify(
+        message.get("content") if message.get("content") is not None else message.get("value")
+    )
+    reasoning = _first_text(message, _REASONING_KEYS)
+    if role == "assistant" and reasoning and reasoning not in content:
+        if wrap_reasoning:
+            content = f"<think>\n{reasoning}\n</think>\n\n{content}".strip()
+        else:
+            content = f"{reasoning}\n\n{content}".strip()
+
+    tool_calls = _format_tool_calls(message.get("tool_calls") or message.get("function_call"))
+    if role == "assistant" and tool_calls and "<tool_call>" not in content:
+        content = f"{content}\n{tool_calls}".strip()
+
+    if role == "tool" and content and "<tool_response>" not in content:
+        content = f"<tool_response>\n{content}\n</tool_response>"
+
+    return {"role": role, "content": content} if content else None
+
+
+def _format_tools_block(tools: Any) -> str:
+    tools_text = _stringify(tools)
+    if not tools_text:
+        return ""
+    return (
+        "# Tools\n\n"
+        "You may call one or more functions to assist with the user query.\n\n"
+        "You are provided with function signatures within <tools></tools> XML tags:\n"
+        f"<tools>\n{tools_text}\n</tools>\n\n"
+        "For each function call, return a JSON object with function name and arguments "
+        "within <tool_call></tool_call> XML tags:\n"
+        "<tool_call>\n"
+        '{"name": <function-name>, "arguments": <args-json-object>}\n'
+        "</tool_call>"
+    )
+
+
+def _inject_system_context(
+    messages: list[dict[str, str]],
+    *,
+    system_prompt: str = "",
+    tools: Any = None,
+) -> list[dict[str, str]]:
+    """补齐或扩展 system 消息，同时避免重复注入 source 已内置的工具定义。"""
+    system_prompt = system_prompt.strip()
+    tools_block = _format_tools_block(tools)
+    if not system_prompt and not tools_block:
+        return messages
+
+    output = [dict(message) for message in messages]
+    for message in output:
+        if message["role"] != "system":
+            continue
+        additions: list[str] = []
+        if system_prompt and system_prompt not in message["content"]:
+            additions.append(system_prompt)
+        if tools_block and "<tools>" not in message["content"]:
+            additions.append(tools_block)
+        if additions:
+            message["content"] = "\n\n".join((message["content"], *additions)).strip()
+        return output
+    addition = "\n\n".join(text for text in (system_prompt, tools_block) if text)
+    output.insert(0, {"role": "system", "content": addition})
+    return output
+
+
+def normalize_item_format(
+    item: dict[str, Any],
+    *,
+    wrap_reasoning: bool = False,
+) -> list[dict[str, str]]:
+    """将不同开源数据集清洗为兼容 ChatML、CoT 与工具调用的统一消息格式。"""
+    raw_msgs = (
+        _coerce_message_list(item.get("messages"))
+        or _coerce_message_list(item.get("conversations"))
+        or _coerce_message_list(item.get("dialogue"))
+    )
+    messages = [
+        message
+        for raw in raw_msgs
+        if (message := _normalize_message(raw, wrap_reasoning=wrap_reasoning)) is not None
+    ]
+    if any(message["role"] == "assistant" for message in messages):
+        system_prompt = _first_text(item, ("system_prompt", "system"))
+        tools = next((item.get(key) for key in _TOOL_VALUE_KEYS if item.get(key)), None)
+        if not tools:
+            tools = next(
+                (raw_message.get("tools") for raw_message in raw_msgs if raw_message.get("tools")),
+                None,
+            )
+        return _inject_system_context(messages, system_prompt=system_prompt, tools=tools)
+
+    prompt = ""
+    response = ""
+    for prompt_key, response_key in _PROMPT_PAIR_KEYS:
+        prompt = _stringify(item.get(prompt_key))
+        response = _stringify(item.get(response_key))
+        if prompt and response:
+            break
+    if not prompt or not response:
+        return []
+
+    extra_input = _stringify(item.get("input"))
+    if extra_input:
+        prompt = f"{prompt}\n{extra_input}"
+    reasoning = _first_text(item, _REASONING_KEYS)
+    if reasoning and reasoning not in response:
+        if wrap_reasoning:
+            response = f"<think>\n{reasoning}\n</think>\n\n{response}"
+        else:
+            response = f"{reasoning}\n\n{response}"
+
+    messages = [
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": response},
+    ]
+    system_prompt = _first_text(item, ("system_prompt", "system"))
+    tools = next((item.get(key) for key in _TOOL_VALUE_KEYS if item.get(key)), None)
+    return _inject_system_context(messages, system_prompt=system_prompt, tools=tools)
+
+
+def normalize_sft_batch(
+    batch: dict[str, list[Any]],
+    *,
+    wrap_reasoning: bool = False,
+    add_system_ratio: float = 0.0,
+    empty_think_remove_ratio: float = 0.0,
+    seed: int = 42,
+) -> dict[str, list[list[dict[str, str]]]]:
     """顶层批量标准化纯函数（供 datasets.Dataset.map(batched=True, num_proc=...) 调用）。
 
     在单趟批量转换中同时剔除空对话与无 assistant 回复的脏样本，省去二次 filter 扫描。
@@ -131,10 +300,94 @@ def normalize_sft_batch(batch: dict[str, list[Any]]) -> dict[str, list[list[dict
     out_messages: list[list[dict[str, str]]] = []
     for i in range(n_rows):
         row = {k: batch[k][i] for k in keys}
-        msgs = normalize_item_format(row)
+        msgs = normalize_item_format(row, wrap_reasoning=wrap_reasoning)
         if msgs:
             out_messages.append(msgs)
     return {"messages": out_messages}
+
+
+def _has_tool_messages(messages: list[dict[str, str]]) -> bool:
+    return any(message.get("role") in {"tool", "function", "observation"} for message in messages)
+
+
+def _template_tools(messages: list[dict[str, Any]]) -> Any:
+    for message in messages:
+        tools = message.get("tools")
+        if tools:
+            if isinstance(tools, str):
+                try:
+                    return json.loads(tools)
+                except json.JSONDecodeError:
+                    return tools
+            return tools
+    return None
+
+
+def _template_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        rendered = {"role": message["role"], "content": message.get("content", "")}
+        if message.get("tool_calls"):
+            tool_calls = message["tool_calls"]
+            if isinstance(tool_calls, str):
+                try:
+                    tool_calls = json.loads(tool_calls)
+                except json.JSONDecodeError:
+                    pass
+            rendered["tool_calls"] = tool_calls
+        out.append(rendered)
+    return out
+
+
+def _encode_with_chat_template(
+    messages: list[dict[str, Any]],
+    tokenizer: Any,
+    max_length: int,
+    chat_start_token: str,
+    chat_end_token: str,
+    ignore_index: int,
+    drop_no_target: bool,
+) -> dict[str, Any] | None:
+    rendered: list[str] = []
+    assistant_ends: list[int] = []
+    tools = _template_tools(messages)
+    for index, message in enumerate(messages):
+        current = _template_messages(messages[: index + 1])
+        try:
+            text = tokenizer.apply_chat_template(
+                current,
+                tokenize=False,
+                add_generation_prompt=False,
+                tools=tools,
+            )
+        except (TypeError, ValueError, KeyError):
+            return None
+        rendered.append(text)
+        if message.get("role") == "assistant":
+            assistant_ends.append(len(tokenizer.encode(text, add_special_tokens=False)))
+    final_ids = tokenizer.encode(rendered[-1], add_special_tokens=False)
+    if not final_ids:
+        return None
+    input_ids = list(final_ids[:max_length])
+    labels = [ignore_index] * len(input_ids)
+    for index, message in enumerate(messages):
+        current_ids = tokenizer.encode(rendered[index], add_special_tokens=False)
+        if message.get("role") == "assistant":
+            current_text = rendered[index]
+            assistant_header = f"{chat_start_token}assistant\n"
+            header_pos = current_text.rfind(assistant_header)
+            if header_pos >= 0:
+                header_text = current_text[:header_pos] + assistant_header
+                header_len = len(tokenizer.encode(header_text, add_special_tokens=False))
+                start = max(0, header_len - 1)
+                end = min(len(current_ids), len(input_ids))
+                if end > start:
+                    labels[start:end] = input_ids[start:end]
+    if len(input_ids) < 2 or not any(label != ignore_index for label in labels[1:]):
+        if drop_no_target:
+            return None
+        labels[-1] = input_ids[-1]
+    return {"input_ids": input_ids, "labels": labels, "length": len(input_ids)}
 
 
 def encode_chatml_messages(
@@ -145,17 +398,34 @@ def encode_chatml_messages(
     chat_end_token: str = DEFAULT_CHAT_END_TOKEN,
     ignore_index: int = DEFAULT_IGNORE_INDEX,
     drop_no_target: bool = True,
+    use_chat_template: bool = True,
 ) -> dict[str, Any] | None:
     """将标准化后的多轮对话编码为带有 Prompt Masking 的 input_ids 与 labels。"""
+    if (
+        use_chat_template
+        and getattr(tokenizer, "chat_template", None)
+        and (_has_tool_messages(messages) or "<think>" in ", ".join(m.get("content", "") for m in messages))
+    ):
+        return _encode_with_chat_template(
+            messages=messages,
+            tokenizer=tokenizer,
+            max_length=max_length,
+            chat_start_token=chat_start_token,
+            chat_end_token=chat_end_token,
+            ignore_index=ignore_index,
+            drop_no_target=drop_no_target,
+        )
     input_ids: list[int] = []
     labels: list[int] = []
 
     for msg in messages:
         role = msg["role"]
         content = msg["content"]
+        # Qwen 的 ChatML 工具响应使用 user 角色包裹 <tool_response>，而不是新增 tool 角色。
+        rendered_role = "user" if role == "tool" else role
 
         # 分别编码前缀与内容，避免 BPE 在边界处因换行符/空格合并导致 prefix_len 偏移
-        prefix_text = f"{chat_start_token}{role}\n"
+        prefix_text = f"{chat_start_token}{rendered_role}\n"
         body_text = f"{content}{chat_end_token}\n"
 
         prefix_tokens = tokenizer.encode(prefix_text, add_special_tokens=False)

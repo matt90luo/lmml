@@ -1,0 +1,7 @@
+defaults:
+  - minimind_sft_full
+  - _self_
+mode: lora
+lr: 1.0e-4
+export:
+  save_dir: ${paths.base_dir}/minimind3_lora_final

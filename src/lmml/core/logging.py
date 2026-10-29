@@ -9,7 +9,7 @@ from typing import Any
 
 import wandb
 from hydra.utils import instantiate
-from lightning.pytorch.loggers import Logger, WandbLogger
+from lightning.pytorch.loggers import CSVLogger, Logger, WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from rich.console import Console
 
@@ -64,6 +64,11 @@ def build_logger(cfg: DictConfig) -> Logger:
     logger_cfg = OmegaConf.to_container(raw_logger, resolve=True) if raw_logger is not None else {}
     if not isinstance(logger_cfg, dict):
         logger_cfg = {}
+
+    if not bool(logger_cfg.get("enabled", True)):
+        save_dir = str(logger_cfg.get("save_dir") or "outputs")
+        Path(save_dir).mkdir(parents=True, exist_ok=True)
+        return CSVLogger(save_dir=save_dir, name=str(logger_cfg.get("name") or "lmml"))
 
     target = logger_cfg.get("_target_")
     if target and target != "lightning.pytorch.loggers.WandbLogger":

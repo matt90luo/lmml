@@ -1,0 +1,7 @@
+defaults:
+  - minimind_sft_full_moe
+  - _self_
+mode: lora
+lr: 1.0e-4
+export:
+  save_dir: ${paths.base_dir}/minimind3_moe_lora_final

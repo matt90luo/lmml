@@ -38,6 +38,7 @@ class CausalLMSFTLightningModule(pl.LightningModule):
         lora_dropout: float = 0.05,
         lora_target_modules: Sequence[str] = DEFAULT_QWEN35_LORA_TARGET_MODULES,
         max_new_tokens: int = 128,
+        model_config: dict[str, Any] | None = None,
     ):
         super().__init__()
         self.mode = str(mode).strip().lower()
@@ -68,6 +69,7 @@ class CausalLMSFTLightningModule(pl.LightningModule):
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
             lora_target_modules=self.lora_target_modules,
+            model_config=model_config,
         )
         self.train()
 
@@ -108,8 +110,11 @@ class CausalLMSFTLightningModule(pl.LightningModule):
             attention_mask=batch["attention_mask"],
             labels=batch["labels"],
         )
-        loss = outputs.loss
+        aux_loss = getattr(outputs, "aux_loss", None)
+        loss = outputs.loss + aux_loss if aux_loss is not None else outputs.loss
         bsz = batch["input_ids"].size(0)
+        if aux_loss is not None:
+            self.log("train/aux_loss", aux_loss, on_step=True, on_epoch=True, logger=True)
         self.log(
             "train/loss",
             loss,
@@ -127,7 +132,8 @@ class CausalLMSFTLightningModule(pl.LightningModule):
             attention_mask=batch["attention_mask"],
             labels=batch["labels"],
         )
-        val_loss = outputs.loss
+        aux_loss = getattr(outputs, "aux_loss", None)
+        val_loss = outputs.loss + aux_loss if aux_loss is not None else outputs.loss
         bsz = batch["input_ids"].size(0)
         self.log(
             "val/loss",

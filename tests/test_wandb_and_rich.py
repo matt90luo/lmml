@@ -63,9 +63,10 @@ def test_build_rich_callbacks_respects_trainer_flags():
     )
     pbar = next(cb for cb in cbs_on if isinstance(cb, RichProgressBar))
     summary = next(cb for cb in cbs_on if isinstance(cb, RichModelSummary))
-    assert pbar.theme.description == "green_yellow"
-    assert pbar.theme.progress_bar == "cyan"
-    assert pbar.theme.progress_bar_finished == "green"
+    configured = cfg.callbacks.rich_progress.theme
+    assert pbar.theme.description == configured.description
+    assert pbar.theme.progress_bar == configured.progress_bar
+    assert pbar.theme.progress_bar_finished == configured.progress_bar_finished
     assert summary._max_depth == 2
 
     # 关闭进度条与模型摘要（如 trainer=debug）时不注入，防止 Lightning MisconfigurationException

@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - override /recipe: causal_lm_sft
+  - override /algo: minimind_pretrain
+  - override /data: minimind_pretrain
+  - override /trainer: colab_sft
+  - override /net: null
+  - override /env: null
+  - override /collect: null
+
+optimized_metric: val/loss
+eval:
+  enabled: false
+callbacks:
+  checkpoint:
+    dirpath: ${paths.base_dir}/checkpoints_minimind3_pretrain
+    filename: minimind3-pretrain-{epoch:02d}-{step:06d}
+    monitor: val/loss
+    mode: min
+    save_top_k: 1
+    save_last: true
+    save_weights_only: false
+logger:
+  project: lmml-projects
+  name: minimind3-pretrain
+  tags: [llm, minimind, minimind3_pretrain]
