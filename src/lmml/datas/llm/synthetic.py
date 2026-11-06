@@ -106,6 +106,11 @@ def create_tiny_qwen_model_and_tokenizer(
         "<unk>",
         "<|im_start|>",
         "<|im_end|>",
+        "<|fim_prefix|>",
+        "<|fim_middle|>",
+        "<|box_start|>",
+        "<|box_end|>",
+        "<|fim_suffix|>",
         "\n",
         "system",
         "user",
@@ -186,7 +191,15 @@ def create_tiny_qwen_model_and_tokenizer(
         unk_token="<unk>",
         pad_token="<|im_end|>",
         eos_token="<|im_end|>",
-        additional_special_tokens=["<|im_start|>", "<|im_end|>"],
+        additional_special_tokens=[
+            "<|im_start|>",
+            "<|im_end|>",
+            "<|fim_prefix|>",
+            "<|fim_middle|>",
+            "<|box_start|>",
+            "<|box_end|>",
+            "<|fim_suffix|>",
+        ],
     )
     fast_tokenizer.save_pretrained(str(out_dir))
 

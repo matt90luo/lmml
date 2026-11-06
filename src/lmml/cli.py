@@ -18,9 +18,9 @@ Usage:
 
 Commands:
   data      Prepare and tokenize LLM datasets for later training
-  train     Train an RL or LLM SFT model (LoRA, Full SFT, online/offline/warmup RL)
+  train     Train an RL / LLM SFT / Kev decision model
   test      Evaluate a trained model or checkpoint
-  predict   Run inference / generation and export predictions
+  predict   Run generation or Kev decision inference and export predictions
   collect   Collect offline transitions from a Gymnasium environment
 
 Examples:
@@ -39,6 +39,11 @@ Examples:
   lmml train experiment=minimind3_full_sft
   lmml train experiment=minimind3_grpo
   lmml train experiment=minimind3_moe_agent_rl
+
+  # Kev decision model (Qwen3.5 + pointer readout)
+  lmml data experiment=kev_08b_lora
+  lmml train experiment=kev_08b_lora
+  lmml predict experiment=kev_08b_lora ckpt_path=/content/kev_08b_lora_final
 
   # RL (Rainbow DQN)
   lmml train experiment=rainbow_gridworld_online

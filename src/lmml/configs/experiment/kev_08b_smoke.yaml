@@ -1,0 +1,28 @@
+# @package _global_
+defaults:
+  - override /recipe: kev_decision
+  - override /algo: kev_08b_lora
+  - override /data: kev_smoke
+  - override /trainer: colab_sft
+  - override /net: null
+  - override /env: null
+  - override /collect: null
+optimized_metric: val/loss
+eval:
+  enabled: false
+algo:
+  export:
+    save_dir: ${paths.base_dir}/kev_08b_smoke_final
+callbacks:
+  checkpoint:
+    dirpath: ${paths.base_dir}/checkpoints_kev_08b_smoke
+    filename: kev-smoke-{epoch:02d}-{step:06d}
+    monitor: val/loss
+    mode: min
+    save_top_k: 1
+    save_last: true
+    save_weights_only: false
+logger:
+  project: lmml-projects
+  name: kev-08b-smoke
+  tags: [llm, kev, decision-model, smoke]

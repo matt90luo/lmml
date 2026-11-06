@@ -1,0 +1,25 @@
+# @package _global_
+defaults:
+  - override /recipe: kev_decision
+  - override /algo: kev_08b_lora
+  - override /data: kev_suits
+  - override /trainer: colab_sft
+  - override /net: null
+  - override /env: null
+  - override /collect: null
+optimized_metric: val/loss
+eval:
+  enabled: false
+callbacks:
+  checkpoint:
+    dirpath: ${paths.base_dir}/checkpoints_kev_08b_lora
+    filename: kev-08b-lora-{epoch:02d}-{step:06d}
+    monitor: val/loss
+    mode: min
+    save_top_k: 1
+    save_last: true
+    save_weights_only: false
+logger:
+  project: lmml-projects
+  name: kev-08b-lora
+  tags: [llm, kev, decision-model, qwen3.5, lora]

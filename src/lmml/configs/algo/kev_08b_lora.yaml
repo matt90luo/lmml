@@ -1,0 +1,43 @@
+mode: lora
+lr: 1.0e-4
+head_lr: 1.0e-4
+weight_decay: 0.0
+warmup_ratio: 0.1
+matmul_precision: high
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  - in_proj_qkv
+  - in_proj_z
+  - in_proj_a
+  - in_proj_b
+  - out_proj
+pointer_dim: 256
+option_isolation: false
+ord_weight: 0.1
+label_smoothing: 0.0
+p_none: 0.1
+p_none_distract: 0.12
+p_distract: 0.15
+p_none_pair: 0.25
+init_from: null
+model:
+  name_or_path: ${paths.base_model_dir}/Qwen3.5-0.8B-Base
+  attn_implementation: sdpa
+  torch_dtype: bfloat16
+  use_gradient_checkpointing: true
+  trust_remote_code: true
+calibration:
+  enabled: true
+  max_samples: 4000
+export:
+  enabled: true
+  save_dir: ${paths.base_dir}/kev_08b_lora_final

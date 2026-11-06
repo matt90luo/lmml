@@ -13,6 +13,7 @@ from rich.console import Console
 from lmml.core.callbacks import build_rich_callbacks
 from lmml.core.logging import build_logger, finish_logger
 from lmml.core.recipe import Recipe
+from lmml.datas.llm.kev import prepare_kev_dataset
 from lmml.datas.llm.prepare import prepare_llm_dataset
 from lmml.datas.llm.sft import build_sft_tokenizer
 from lmml.datas.rl.datamodule import make_env_from_cfg
@@ -63,6 +64,28 @@ def run_data(cfg: DictConfig) -> dict:
     prepared_path = data.get("prepared_path")
     if not prepared_path:
         raise ValueError("`lmml data` 必须配置 data.prepared_path。")
+
+    if str(data.get("task", "sft")).lower() == "kev":
+        fallback_raw = data.get("fallback_sources", [])
+        fallback_sources = (
+            OmegaConf.to_container(fallback_raw, resolve=True)
+            if OmegaConf.is_config(fallback_raw)
+            else fallback_raw
+        )
+        summary = prepare_kev_dataset(
+            data_configs=raw_sources,
+            tokenizer=tokenizer,
+            output_dir=str(prepared_path),
+            overwrite=bool(data.get("overwrite", True)),
+            max_state=int(data.get("max_state", 384)),
+            max_branch=int(data.get("max_branch", 1024)),
+            max_train_samples=data.get("max_train_samples"),
+            max_val_samples=data.get("max_val_samples"),
+            seed=int(cfg.seed),
+            fallback_sources=fallback_sources,
+        )
+        console.print(f"[bold green][lmml data][/bold green] summary: {summary}")
+        return summary
 
     summary = prepare_llm_dataset(
         data_configs=raw_sources,

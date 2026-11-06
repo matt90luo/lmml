@@ -1,0 +1,11 @@
+defaults:
+  - kev_08b_lora
+  - _self_
+mode: full
+lr: 1.0e-5
+head_lr: 1.0e-4
+lora_r: 0
+lora_alpha: 0
+export:
+  enabled: true
+  save_dir: ${paths.base_dir}/kev_08b_full_final

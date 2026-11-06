@@ -27,7 +27,7 @@ from lmml.datas.llm.sft import (
 
 console = Console()
 
-PREPARE_TASKS = ("pretrain", "sft", "dpo", "ppo", "grpo", "agent_rl")
+PREPARE_TASKS = ("pretrain", "sft", "dpo", "ppo", "grpo", "agent_rl", "kev")
 
 
 def _normalize_messages(value: Any, *, default_role: str | None = None) -> list[dict[str, str]]:
@@ -450,6 +450,7 @@ def _validate_task_columns(batch: dict[str, list[Any]], task: str) -> None:
         "ppo": {"prompt", "messages", "conversations", "query", "instruction"},
         "grpo": {"prompt", "messages", "conversations", "query", "instruction"},
         "agent_rl": {"messages", "conversations"},
+        "kev": {"state", "questions"},
     }[task]
     if required and not required.intersection(batch):
         raise ValueError(f"data.task={task} 需要数据源包含字段之一: {sorted(required)}")
@@ -529,11 +530,30 @@ def prepare_llm_dataset(
     add_system_ratio: float = 0.0,
     empty_think_remove_ratio: float = 0.0,
     seed: int = 42,
+    max_state: int = 384,
+    max_branch: int = 1024,
+    max_train_samples: int | None = None,
+    fallback_sources: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """构建 SFT / DPO / PPO 的预分词 DatasetDict 并持久化到输出目录。"""
+    """构建 SFT / DPO / PPO / Kev 的预处理 DatasetDict 并持久化到输出目录。"""
     task = task.strip().lower()
     if task not in PREPARE_TASKS:
         raise ValueError(f"不支持的 data.task={task!r}，可选值: {PREPARE_TASKS}")
+    if task == "kev":
+        from lmml.datas.llm.kev import prepare_kev_dataset
+
+        return prepare_kev_dataset(
+            data_configs,
+            tokenizer,
+            output_dir,
+            overwrite=overwrite,
+            max_state=max_state,
+            max_branch=max_branch,
+            max_train_samples=max_train_samples,
+            max_val_samples=max_val_samples,
+            seed=seed,
+            fallback_sources=fallback_sources,
+        )
     if not isinstance(data_configs, list) or not data_configs:
         raise ValueError("data.sources 必须是非空的数据源字典列表。")
 

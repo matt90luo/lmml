@@ -1,5 +1,6 @@
 """LLM 数据模块导出。"""
 
+from lmml.datas.llm.kev import prepare_kev_dataset
 from lmml.datas.llm.prepare import (
     PREPARE_TASKS,
     encode_chatml_prompt,
@@ -56,6 +57,7 @@ __all__ = [
     "normalize_ppo_batch",
     "normalize_pretrain_batch",
     "normalize_sft_batch",
+    "prepare_kev_dataset",
     "prepare_llm_dataset",
     "tokenize_agent_rl_batch",
     "tokenize_dpo_batch",

@@ -1,0 +1,14 @@
+defaults:
+  - kev_08b_lora
+  - _self_
+lr: 5.0e-5
+head_lr: 1.0e-4
+model:
+  name_or_path: ${paths.base_model_dir}/Qwen3.5-4B-Base
+  attn_implementation: sdpa
+  torch_dtype: bfloat16
+  use_gradient_checkpointing: true
+  trust_remote_code: true
+export:
+  enabled: true
+  save_dir: ${paths.base_dir}/kev_4b_lora_final
