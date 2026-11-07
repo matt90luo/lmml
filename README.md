@@ -89,6 +89,8 @@ lmml data experiment=kev_08b_smoke \
 lmml train experiment=kev_08b_smoke
 ```
 
+训练结束后的温度校准默认按 `algo.calibration.batch_size=1` 分批执行，避免在 4 GB GPU 上一次性前向整个 calibration split。若校准仍然失败，训练流程会导出 `temperature=1.0` 的检查点并把 WandB Run 标记为 Failed，已训练权重不会丢失。
+
 进程内 SDK：
 
 ```python

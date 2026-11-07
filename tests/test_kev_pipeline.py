@@ -7,6 +7,7 @@ import pytest
 import torch
 from hydra import compose, initialize_config_module
 from lightning.pytorch import Trainer
+from omegaconf import OmegaConf
 
 from lmml.core.llm.kev.api import (
     Choice,
@@ -31,6 +32,7 @@ from lmml.core.llm.kev.model import (
     user_tokens,
 )
 from lmml.core.llm.kev.module import KevLightningModule
+from lmml.core.llm.kev.recipe import KevDecisionRecipe
 from lmml.core.llm.kev.sdk import TypeSafeClient
 from lmml.datas.llm.kev import prepare_kev_dataset
 from lmml.datas.llm.sft import build_sft_tokenizer
@@ -191,7 +193,7 @@ def test_kev_qwen35_hybrid_forward(tmp_path):
     assert all(torch.isfinite(value).all() for value in probabilities)
 
 
-def test_kev_training_checkpoint_sdk_and_configs(tmp_path):
+def test_kev_training_checkpoint_sdk_and_configs(tmp_path, monkeypatch):
     base = create_tiny_qwen_model_and_tokenizer(tmp_path / "base")
     tokenizer = build_sft_tokenizer(str(base))
     suite = tmp_path / "suite"
@@ -229,6 +231,12 @@ def test_kev_training_checkpoint_sdk_and_configs(tmp_path):
             }
         ],
     )
+    calibration_loader = datamodule.calibration_dataloader(max_samples=2, batch_size=1)
+    assert len(calibration_loader.dataset) == 2
+    with pytest.raises(ValueError, match="max_samples"):
+        datamodule.calibration_dataloader(max_samples=0)
+    with pytest.raises(ValueError, match="batch_size"):
+        datamodule.calibration_dataloader(max_samples=2, batch_size=0)
     module = KevLightningModule(
         str(base),
         tokenizer,
@@ -248,8 +256,36 @@ def test_kev_training_checkpoint_sdk_and_configs(tmp_path):
         enable_model_summary=False,
     )
     trainer.fit(module, datamodule=datamodule)
-    temperature = module.calibrate(datamodule, max_samples=4)
+    forward_batches: list[int] = []
+    original_forward = module.model.forward_batch
+
+    def tracked_forward(encodings):
+        forward_batches.append(len(encodings))
+        return original_forward(encodings)
+
+    monkeypatch.setattr(module.model, "forward_batch", tracked_forward)
+    temperature = module.calibrate(datamodule, max_samples=4, batch_size=2)
     assert 0.25 <= temperature <= 4.0
+    assert forward_batches == [2, 2]
+    assert module.calibration_stats["accepted_records"] == 4
+    assert module.calibration_stats["question_rows"] == 12
+
+    class EmptyCalibrationLoader:
+        def __init__(self):
+            self.dataset = []
+
+        def __iter__(self):
+            return iter(())
+
+    monkeypatch.setattr(
+        datamodule,
+        "calibration_dataloader",
+        lambda **kwargs: EmptyCalibrationLoader(),
+    )
+    with pytest.raises(ValueError, match="no usable question rows"):
+        module.calibrate(datamodule, max_samples=4, batch_size=1)
+    assert module.model.head.temperature == 1.0
+
     export = save_kev_checkpoint(
         module.model,
         tokenizer,
@@ -277,8 +313,41 @@ def test_kev_training_checkpoint_sdk_and_configs(tmp_path):
     assert 0 <= response.answers["anger"].score <= 1
     assert response.usage.input_tokens > 0
 
+    cfg = OmegaConf.create(
+        {
+            "algo": {
+                "model": {"name_or_path": str(base)},
+                "mode": "full",
+                "lora_r": 0,
+                "lora_alpha": 0,
+                "pointer_dim": 256,
+                "option_isolation": False,
+                "calibration": {"enabled": True, "max_samples": 4, "batch_size": 1},
+                "export": {"enabled": True, "save_dir": str(tmp_path / "failed_export")},
+            }
+        }
+    )
+    recipe = KevDecisionRecipe(cfg)
+    failed_exports: list[dict] = []
+
+    def fail_calibration(*args, **kwargs):
+        raise torch.OutOfMemoryError("simulated calibration OOM")
+
+    def capture_export(*args, **kwargs):
+        failed_exports.append(kwargs)
+        return str(tmp_path / "failed_export")
+
+    monkeypatch.setattr(module, "calibrate", fail_calibration)
+    monkeypatch.setattr("lmml.core.llm.kev.recipe.save_kev_checkpoint", capture_export)
+    with pytest.raises(torch.OutOfMemoryError, match="simulated calibration OOM"):
+        recipe.on_fit_end(trainer, module, datamodule)
+    assert failed_exports[0]["temperature"] == 1.0
+    assert failed_exports[0]["extra"]["calibration"]["status"] == "failed"
+    assert "simulated calibration OOM" in failed_exports[0]["extra"]["calibration"]["error"]
+
     with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
         for name in ("kev_08b_lora", "kev_08b_full", "kev_4b_lora", "kev_08b_smoke"):
             cfg = compose(config_name="config", overrides=[f"experiment={name}", "command=data"])
             assert cfg.recipe._target_.endswith("KevDecisionRecipe")
             assert cfg.data.task == "kev"
+            assert cfg.algo.calibration.batch_size == 1

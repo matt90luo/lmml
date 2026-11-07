@@ -151,6 +151,7 @@ def run(cfg: DictConfig) -> float | dict | None:
     callbacks = _merge_callbacks(recipe_callbacks, rich_callbacks)
 
     logger = build_logger(cfg)
+    exit_code = 0
     try:
         trainer = pl.Trainer(**trainer_kwargs, logger=logger, callbacks=callbacks)
 
@@ -174,5 +175,8 @@ def run(cfg: DictConfig) -> float | dict | None:
         saved = recipe.save_predictions(preds, out_path)
         console.print(f"[bold green][lmml predict][/bold green] saved predictions to: {saved}")
         return {"output": saved}
+    except BaseException:
+        exit_code = 1
+        raise
     finally:
-        finish_logger()
+        finish_logger(exit_code=exit_code)

@@ -126,8 +126,8 @@ def build_logger(cfg: DictConfig) -> Logger:
     return wb_logger
 
 
-def finish_logger() -> None:
-    """安全关闭当前活跃的 WandB Run，防止进程退出或连续执行时遗留全局状态。"""
+def finish_logger(exit_code: int = 0) -> None:
+    """安全关闭当前活跃的 WandB Run，并记录成功或失败状态。"""
     with contextlib.suppress(RuntimeError, OSError, ValueError):
         if wandb.run is not None:
-            wandb.finish()
+            wandb.finish(exit_code=int(exit_code))

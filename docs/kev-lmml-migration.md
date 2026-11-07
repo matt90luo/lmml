@@ -76,6 +76,7 @@ lmml train experiment=kev_08b_lora
 lmml data experiment=kev_08b_smoke
 lmml train experiment=kev_08b_smoke \
   data.batch_size=1 data.val_batch_size=1 data.num_workers=0 \
+  algo.calibration.batch_size=1 \
   trainer.max_epochs=1 +trainer.limit_train_batches=4 +trainer.limit_val_batches=1 \
   trainer.accumulate_grad_batches=8 trainer.precision=bf16-mixed
 ```
@@ -85,7 +86,8 @@ lmml train experiment=kev_08b_smoke \
 - `Choice` / `Noul`：Cross-Entropy；软标签 `Choice` 使用目标分布 CE；
 - `Score`：CE + 有序累积分布 RPS 正则；
 - 数据增强：选项乱序、`none_of_the_above` 注入、无关干扰项、`none_pair` 最小对比对；
-- 训练结束自动在 calibration split 上拟合温度（121 点对数网格 `[0.25, 4.0]`）；
+- 训练结束自动在 calibration split 上分批拟合温度（121 点对数网格 `[0.25, 4.0]`），`algo.calibration.batch_size` 默认 `1`；
+- 校准前清理 CUDA 缓存，校准完成后先释放 GPU 再导出；若校准失败，仍导出 `temperature=1.0` 的检查点并在 `kev_config.json` 中记录失败原因，同时将 WandB Run 标记为 Failed；
 - 导出目录包含 `head.pt`、`adapter_model.safetensors` / 全量权重、tokenizer 和 `kev_config.json`。
 
 ## 5. 预测与 SDK
@@ -174,5 +176,6 @@ HTTP 服务实现 `POST /v1/systemone`、`GET /v1/models`，并返回 `x-typesaf
 ## 6. 当前环境验证
 
 - 本机 PyTorch 报告 `cuda_available=False`，NVML 不可用，因此无法实际执行 4GB GPU smoke。
-- 已完成 CPU 验证：真实 `Qwen3.5-0.8B-Base` 的 hybrid 前向、LoRA 装配、Kev 数据准备、单步训练、温度校准、检查点导出、CLI predict 与进程内 SDK。
-- 自动化测试：`51 passed`；Ruff：`All checks passed`。
+- 已完成 CPU 验证：真实 `Qwen3.5-0.8B-Base` 的 hybrid 前向、LoRA 装配、Kev 数据准备、单步训练、分批温度校准、检查点导出、CLI predict 与进程内 SDK。
+- 本轮校准修复覆盖分批前向、空校准集、失败时导出 `temperature=1.0` 和 WandB exit code；Ruff：`All checks passed`。
+- 本机完整 `pytest` 为 `51 passed, 1 failed`，唯一失败是既有 Qwen3.5 hybrid CPU 测试触发 FLA/Triton 的 `0 active drivers`，与本轮校准路径无关；真实 4GB GPU smoke 仍待可用 CUDA 主机执行。

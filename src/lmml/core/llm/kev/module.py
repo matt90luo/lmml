@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from typing import Any
 
@@ -10,11 +9,11 @@ import lightning.pytorch as pl
 import torch
 import torch.nn.functional as F
 
-from lmml.core.llm.kev.api import materialize_labelled, output_tokens, to_answers
+from lmml.core.llm.kev.api import output_tokens, to_answers
 from lmml.core.llm.kev.checkpoint import warm_start_kev
 from lmml.core.llm.kev.data import KevDataModule
 from lmml.core.llm.kev.metrics import fit_temperature, metrics
-from lmml.core.llm.kev.model import KevDecisionModel, encode
+from lmml.core.llm.kev.model import KevDecisionModel
 
 
 def question_loss(
@@ -90,6 +89,7 @@ class KevLightningModule(pl.LightningModule):
         self.init_source = warm_start_kev(self.model, init_from) if init_from else None
         self._val_rows: list[dict[str, Any]] = []
         self._test_rows: list[dict[str, Any]] = []
+        self.calibration_stats: dict[str, Any] = {}
 
     def _batch_loss(
         self, records: list[dict[str, Any]]
@@ -118,6 +118,20 @@ class KevLightningModule(pl.LightningModule):
             losses.append(torch.stack(record_losses).mean())
             probability_rows.append(probabilities)
         return torch.stack(losses).mean(), logits, probability_rows
+
+    def _batch_probabilities(self, records: list[dict[str, Any]]) -> list[list[float]]:
+        if not records:
+            return []
+        logits = self.model.forward_batch(records)
+        probability_rows = [
+            [
+                F.softmax(values.float(), dim=-1).detach().cpu().tolist()
+                for values in record_logits
+            ]
+            for record_logits in logits
+        ]
+        del logits
+        return probability_rows
 
     @staticmethod
     def _metric_rows(records: list[dict[str, Any]], probabilities: list[list[float]]) -> list[dict[str, Any]]:
@@ -202,26 +216,62 @@ class KevLightningModule(pl.LightningModule):
         return {"results": results}
 
     @torch.no_grad()
-    def calibrate(self, datamodule: KevDataModule, max_samples: int = 4000) -> float:
-        rows = datamodule.calibration_records()[: int(max_samples)]
-        records: list[dict[str, Any]] = []
-        for row in rows:
-            record = json.loads(row["record_json"]) if isinstance(row.get("record_json"), str) else row
-            materialized = materialize_labelled(record)
-            encoded = encode(
-                self.tokenizer,
-                materialized,
-                max_state=datamodule.max_state,
-                max_branch=datamodule.max_branch,
-                strict=True,
-            )
-            records.append(encoded)
+    def calibrate(
+        self,
+        datamodule: KevDataModule,
+        max_samples: int = 4000,
+        batch_size: int = 1,
+    ) -> float:
+        """Fit one temperature from calibration records in bounded batches."""
+        max_samples = int(max_samples)
+        batch_size = int(batch_size)
+        if max_samples <= 0:
+            raise ValueError("max_samples must be positive")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        self.calibration_stats = {}
+        loader = datamodule.calibration_dataloader(
+            max_samples=max_samples,
+            batch_size=batch_size,
+        )
+        selected_records = len(loader.dataset)
+        was_training = self.model.training
         self.model.eval()
         self.model.head.temperature = 1.0
-        _, _, probabilities = self._batch_loss(records)
-        metric_rows = self._metric_rows(records, probabilities)
-        temperature = fit_temperature(metric_rows, aggregation="micro", points=121)
+        metric_rows: list[dict[str, Any]] = []
+        accepted_records = 0
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        try:
+            for batch in loader:
+                records = batch.get("records", [])
+                if not records:
+                    continue
+                probabilities = self._batch_probabilities(records)
+                metric_rows.extend(self._metric_rows(records, probabilities))
+                accepted_records += len(records)
+            if not metric_rows:
+                raise ValueError("calibration produced no usable question rows")
+            temperature = fit_temperature(metric_rows, aggregation="micro", points=121)
+        except BaseException:
+            self.model.head.temperature = 1.0
+            raise
+        finally:
+            if was_training:
+                self.model.train()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         self.model.head.temperature = temperature
+        self.calibration_stats = {
+            "status": "success",
+            "selected_records": selected_records,
+            "accepted_records": accepted_records,
+            "skipped_records": selected_records - accepted_records,
+            "question_rows": len(metric_rows),
+            "max_samples": max_samples,
+            "batch_size": batch_size,
+            "temperature": temperature,
+        }
         return temperature
 
     def configure_optimizers(self) -> Any:

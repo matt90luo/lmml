@@ -10,7 +10,7 @@ from typing import Any
 
 import lightning.pytorch as pl
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from lmml.core.llm.kev.api import SystemOneRequest, materialize_labelled, to_record
 from lmml.core.llm.kev.model import (
@@ -361,6 +361,41 @@ class KevDataModule(pl.LightningDataModule):
             shuffle=False,
             collate_fn=KevPredictionCollator(self.tokenizer, self.max_state, self.max_branch),
             num_workers=0,
+        )
+
+    def calibration_dataloader(
+        self,
+        *,
+        max_samples: int | None = None,
+        batch_size: int | None = None,
+    ) -> DataLoader:
+        """Return a deterministic, non-augmented calibration loader.
+
+        ``max_samples`` limits raw records before collation, while ``batch_size``
+        controls how many records enter one model forward pass.
+        """
+        self.setup("fit")
+        assert self.calibration_dataset is not None
+        if max_samples is not None:
+            max_samples = int(max_samples)
+            if max_samples <= 0:
+                raise ValueError("max_samples must be positive")
+            dataset: Dataset = Subset(
+                self.calibration_dataset,
+                range(min(max_samples, len(self.calibration_dataset))),
+            )
+        else:
+            dataset = self.calibration_dataset
+        size = int(batch_size if batch_size is not None else self.val_batch_size)
+        if size <= 0:
+            raise ValueError("batch_size must be positive")
+        return DataLoader(
+            dataset,
+            batch_size=size,
+            shuffle=False,
+            collate_fn=self.eval_collator,
+            num_workers=self.num_workers,
+            pin_memory=torch.cuda.is_available(),
         )
 
     def calibration_records(self) -> list[dict[str, Any]]:

@@ -6,8 +6,9 @@ import types
 from hydra import compose, initialize_config_module
 from lightning.pytorch.callbacks import RichModelSummary, RichProgressBar
 
+from lmml.core import logging as logging_module
 from lmml.core.callbacks import build_rich_callbacks
-from lmml.core.logging import resolve_wandb_api_key, sanitize_config_dict
+from lmml.core.logging import finish_logger, resolve_wandb_api_key, sanitize_config_dict
 
 
 def test_resolve_wandb_api_key_from_env_and_colab_userdata(monkeypatch):
@@ -75,3 +76,17 @@ def test_build_rich_callbacks_respects_trainer_flags():
         {"enable_progress_bar": False, "enable_model_summary": False},
     )
     assert cbs_off == []
+
+
+def test_finish_logger_records_exit_code(monkeypatch):
+    exit_codes: list[int] = []
+    fake_wandb = types.SimpleNamespace(
+        run=object(),
+        finish=lambda *, exit_code: exit_codes.append(exit_code),
+    )
+    monkeypatch.setattr(logging_module, "wandb", fake_wandb)
+
+    finish_logger(exit_code=0)
+    finish_logger(exit_code=1)
+
+    assert exit_codes == [0, 1]

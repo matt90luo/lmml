@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,13 @@ from lmml.core.recipe import Recipe
 from lmml.datas.llm.sft import build_sft_tokenizer
 
 console = Console()
+
+
+def _release_cuda_memory() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
 
 DEFAULT_DEMO_REQUEST = {
     "state": {
@@ -186,34 +194,88 @@ class KevDecisionRecipe(Recipe):
         assert isinstance(datamodule, KevDataModule)
         calibration = self.cfg.algo.get("calibration") or {}
         temperature = 1.0
+        max_samples = int(calibration.get("max_samples", 4000))
+        batch_size = int(calibration.get("batch_size", 1))
+        calibration_error: Exception | None = None
+        calibration_meta: dict[str, Any] = {
+            "status": "disabled",
+            "temperature": 1.0,
+            "max_samples": max_samples,
+            "batch_size": batch_size,
+        }
         if bool(calibration.get("enabled", True)):
-            temperature = module.calibrate(
-                datamodule,
-                max_samples=int(calibration.get("max_samples", 4000)),
+            _release_cuda_memory()
+            console.print(
+                "[bold cyan][Kev calibration][/bold cyan] "
+                f"fitting on up to {max_samples} records with batch_size={batch_size}"
             )
-            console.print(f"[bold green][Kev calibration][/bold green] temperature={temperature:.4f}")
+            try:
+                temperature = module.calibrate(
+                    datamodule,
+                    max_samples=max_samples,
+                    batch_size=batch_size,
+                )
+                calibration_meta = dict(module.calibration_stats)
+                console.print(
+                    "[bold green][Kev calibration][/bold green] "
+                    f"temperature={temperature:.4f} "
+                    f"records={calibration_meta.get('accepted_records', 0)} "
+                    f"skipped={calibration_meta.get('skipped_records', 0)} "
+                    f"batch_size={batch_size}"
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve the trained checkpoint on any calibration failure
+                calibration_error = exc
+                module.model.head.temperature = 1.0
+                calibration_meta = {
+                    "status": "failed",
+                    "temperature": 1.0,
+                    "max_samples": max_samples,
+                    "batch_size": batch_size,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+                console.print(
+                    "[bold red][Kev calibration failed][/bold red] "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                console.print(
+                    "[yellow][Kev export][/yellow] calibration failed; "
+                    "exporting the trained model with temperature=1.0"
+                )
         export = self.cfg.algo.get("export") or {}
-        if not bool(export.get("enabled", True)):
-            return
         save_dir = export.get("save_dir")
-        if not save_dir:
-            return
-        module.cpu()
-        algo = self.cfg.algo
-        saved = save_kev_checkpoint(
-            module.model,
-            module.tokenizer,
-            str(save_dir),
-            base_model=str(algo.model.name_or_path),
-            mode=str(algo.get("mode", "lora")),
-            lora_r=int(algo.get("lora_r", 0)),
-            lora_alpha=int(algo.get("lora_alpha", 0)),
-            pointer_dim=int(algo.get("pointer_dim", 256)),
-            option_isolation=bool(algo.get("option_isolation", False)),
-            temperature=temperature,
-            extra={"init_source": module.init_source, "args": OmegaConf.to_container(self.cfg, resolve=True)},
-        )
-        console.print(f"[bold green][Kev export][/bold green] {saved}")
+        if bool(export.get("enabled", True)) and save_dir:
+            module.cpu()
+            _release_cuda_memory()
+            algo = self.cfg.algo
+            try:
+                saved = save_kev_checkpoint(
+                    module.model,
+                    module.tokenizer,
+                    str(save_dir),
+                    base_model=str(algo.model.name_or_path),
+                    mode=str(algo.get("mode", "lora")),
+                    lora_r=int(algo.get("lora_r", 0)),
+                    lora_alpha=int(algo.get("lora_alpha", 0)),
+                    pointer_dim=int(algo.get("pointer_dim", 256)),
+                    option_isolation=bool(algo.get("option_isolation", False)),
+                    temperature=temperature,
+                    extra={
+                        "init_source": module.init_source,
+                        "calibration": calibration_meta,
+                        "args": OmegaConf.to_container(self.cfg, resolve=True),
+                    },
+                )
+            except Exception as export_error:
+                if calibration_error is not None:
+                    raise export_error from calibration_error
+                raise
+            console.print(f"[bold green][Kev export][/bold green] {saved}")
+        else:
+            module.cpu()
+            _release_cuda_memory()
+        if calibration_error is not None:
+            raise calibration_error
 
     def save_predictions(self, predictions: list[dict[str, Any]], output_path: str) -> str:
         path = Path(output_path)
