@@ -178,4 +178,29 @@ HTTP 服务实现 `POST /v1/systemone`、`GET /v1/models`，并返回 `x-typesaf
 - 本机 PyTorch 报告 `cuda_available=False`，NVML 不可用，因此无法实际执行 4GB GPU smoke。
 - 已完成 CPU 验证：真实 `Qwen3.5-0.8B-Base` 的 hybrid 前向、LoRA 装配、Kev 数据准备、单步训练、分批温度校准、检查点导出、CLI predict 与进程内 SDK。
 - 本轮校准修复覆盖分批前向、空校准集、失败时导出 `temperature=1.0` 和 WandB exit code；Ruff：`All checks passed`。
-- 本机完整 `pytest` 为 `51 passed, 1 failed`，唯一失败是既有 Qwen3.5 hybrid CPU 测试触发 FLA/Triton 的 `0 active drivers`，与本轮校准路径无关；真实 4GB GPU smoke 仍待可用 CUDA 主机执行。
+- 本机完整 `pytest` 为 `57 passed`；Ruff 与 `git diff --check` 通过。
+- Jev 数据准备已用真实 `jev-distill-corpus-v3` 的小样本完成 CPU 验证：批量预分词、Arrow shard、reservoir sampling、manifest 与完成态复用均通过；真实 4GB GPU smoke 仍待可用 CUDA 主机执行。
+
+
+## 7. Qwen3.8-27B Jev Decision Model (`qwen38_27B_jev`)
+
+针对 `Qwen3.8-27B` 与 `SargeDev/jev-distill-corpus-v3` 数据集的独立候选打分管线：
+
+- **打分路径**：
+  `chat_template(context, question, candidate) -> Qwen3.8-27B language_model + LoRA -> last non-padding token hidden state -> FP32 Linear(hidden_size, 1) -> candidate scalar score -> softmax over candidates`
+- **两段式加载 (`QwenLoraLightningModule`)**：
+  1. 冻结 `Qwen3.8-27B` 纯文本主干 `language_model`，并用预训练输出层 `"Yes" - "No"` 行向量差初始化 `FP32 Linear(hidden_size, 1)`；
+  2. 若指定 `algo.lora_checkpoint_dir` 且目录存在，通过 `PeftModel.from_pretrained(..., is_trainable=True)` 恢复 LoRA 权重及 `head.pt` / `temperature.json`；否则按 `LoraConfig(r=32, lora_alpha=64)` 全新初始化。
+- **损失函数**：软目标交叉熵 + `0.1 * Brier Loss`。
+- **数据准备优化**：
+  - 按 `shard_size=20000` 行分片，worker 使用 `Dataset.from_generator` 流式写 Arrow，避免 65 万行一次性进入 Python list；
+  - 按 `tokenization_batch_size=512` 条记录批量渲染候选并 tokenize，保存 `input_ids_flat` / `candidate_offsets` / `candidate_lengths`，训练 collator 只做 padding；
+  - `max_samples` 使用全文件 reservoir sampling；训练 split 默认按 `(source, kind)` 保持 round-robin 平衡；
+  - `preprocessing_num_proc=auto` 最多 8 进程，每 10,000 行打印进度；
+  - staging shard 完成后写入 `.done.json`，同一配置重跑自动复用已完成 shard；源文件或 tokenizer 变化时拒绝错误复用；
+  - 正式配置使用完整 validation / calibration / test / test_set_30k / ood；smoke 配置单独限制小样本；
+  - 新产物不再保存重复的 `record_json`，而是保存结构化列和预分词字段；旧 `record_json` 数据仍可由 collator 兼容读取。
+- **三阶段流程**：
+  - **阶段一（训练）**：在 `train.jsonl` 上更新，在 `validation.jsonl` 上监控 `val/loss`，自动将最优 Top-2 检查点保存在 `${paths.base_model_dir}/checkpoints_qwen38_27b_jev`（含轻量 `.ckpt` 与 `top1_*` / `top2_*` PEFT 目录）；
+  - **阶段二（校准）**：在 `calibration.jsonl` 上拟合最优正温度系数 `T` 以压低 ECE，写入 `temperature.json`；
+  - **阶段三（验收）**：通过 `lmml test experiment=qwen38_27B_jev`（或 `eval.after_train=true`）依次评测 `test.jsonl`（功能与吞吐）、`test_set_30k.jsonl`（Jev Decision Index 指标）与 `ood.jsonl`（System 1/2 升级触发率与抗盲目自信指标）。

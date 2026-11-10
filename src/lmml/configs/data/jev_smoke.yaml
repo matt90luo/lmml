@@ -7,3 +7,7 @@ max_calibration_samples: 8
 max_test_samples: 8
 max_test_30k_samples: 8
 max_ood_samples: 8
+preprocessing_num_proc: 1
+tokenization_batch_size: 8
+shard_size: 16
+progress_every: 10

@@ -18,13 +18,17 @@
    - RL 奖励支持规则/GT、真实 Hugging Face Reward Model 与无外部依赖的 mock 模式。
    - 完整命令见 [`docs/minimind-lmml-migration.md`](docs/minimind-lmml-migration.md)。
 
-3. **Kev Decision Model (`Qwen3.5` + PointerHead)**：
+3. **Jev Decision Model (`Qwen3.8-27B` + Rank-32 LoRA + FP32 Scalar Head)**：
+   - 对齐 Open-Jev 独立候选打分架构：`chat_template(context, question, candidate) -> Qwen3.8-27B language_model + LoRA -> last non-padding token hidden state -> FP32 Linear(hidden_size, 1) -> softmax`。
+   - 支持两段式加载（冻结基座 + 新建或从 `lora_checkpoint_dir` 恢复 LoRA & Head 权重）、软目标 `Cross-Entropy + 0.1 * Brier Loss`、Validation `save_top_k=2` 保存至 Google Drive、阶段二温度校准与阶段三（`test` / `test_set_30k` / `ood`）验收。
+
+4. **Kev Decision Model (`Qwen3.5` + PointerHead)**：
    - 支持 `Noul` / `Choice` / `Score` 强类型判定原语，一次 Prefill 返回概率、置信度与有序分数。
    - 提供 `kev_08b_lora`、`kev_08b_full`、`kev_4b_lora` 与 `kev_08b_smoke` 实验，支持冻结套件预处理、选项增强、`none_pair`、温度校准、CLI/SDK/HTTP 推理。
 
-4. **強化学习 (`RainbowRecipe`)**：
+5. **強化学习 (`RainbowRecipe`)**：
    - 内置完整 6 组件 **Rainbow DQN**（C51 + Dueling + Double DQN + PER + $n$-step + NoisyNet），支持 **纯离线（Offline）**、**纯在线（Online）**、**离线预热转在线（Warmup-then-Online）** 三种训练模式与可插拔 `QNetwork`（MLP / CNN / Transformer）。
-5. **WandB 日志与 Rich 终端体验**：
+6. **WandB 日志与 Rich 终端体验**：
    - 全局默认接入 `WandbLogger` (`project=lmml-projects`)，自动按 `os.environ["WANDB_API_KEY"]` -> `google.colab.userdata.get("WANDB_API_KEY")` -> `~/.netrc` 解析认证。
    - 内置自定义主题 `RichProgressBar` 与 `RichModelSummary(max_depth=2)`。
 
@@ -63,6 +67,78 @@ lmml train experiment=rainbow_gridworld_offline data.offline_path=data/grid.npz
 lmml train experiment=rainbow_gridworld_warmup data.offline_path=data/grid.npz data.warmup_offline_steps=1000
 ```
 
+
+## Qwen3.8-27B Jev Decision Model (`qwen38_27B_jev`) 快速开始
+
+基于 `Qwen3.8-27B` (`Qwen3_5ForConditionalGeneration` 提取 `language_model`) 与 `SargeDev/jev-distill-corpus-v3` 数据集的独立候选打分型 Decision Model：
+
+```bash
+# 1. 准备数据（读取 Google Drive 上的 jev-distill-corpus-v3 六个 split）
+#    默认流式分片 + 批量预分词 + 最多 8 进程；中断后重复执行会复用已完成 shard
+lmml data experiment=qwen38_27B_jev
+
+# 小样本/快速验证使用 smoke 配置（单进程、小 shard）
+lmml data experiment=qwen38_27B_jev_smoke
+
+# 2. 阶段一训练（Rank-32 LoRA + CE + 0.1*Brier Loss，保存 Validation Top-2 至 Google Drive）
+#    训练结束自动执行阶段二 calibration.jsonl 温度校准并导出最终检查点
+lmml train experiment=qwen38_27B_jev
+
+# 从已有 LoRA Checkpoint 恢复继续训练（两段式加载 Case A）
+lmml train experiment=qwen38_27B_jev \
+  algo.lora_checkpoint_dir=/content/drive/MyDrive/colab-notes/data/models/qwen38_27b_jev_final
+
+# 3. 阶段三最终验收（依次评测 test / test_set_30k / ood 并输出 evaluation_summary.json）
+lmml test experiment=qwen38_27B_jev \
+  ckpt_path=/content/drive/MyDrive/colab-notes/data/models/qwen38_27b_jev_final
+
+# 4. 预测并输出客服工单 Noul / Choice / Score 结构化裁决结果
+lmml predict experiment=qwen38_27B_jev \
+  ckpt_path=/content/drive/MyDrive/colab-notes/data/models/qwen38_27b_jev_final \
+  predict.output=/content/jev_predictions.jsonl
+```
+
+进程内 `TypeSafeClient` 调用：
+
+```python
+from lmml.core.llm.jev import TypeSafeClient, Choice, Noul, Score
+
+with TypeSafeClient(
+    checkpoint_path="/content/drive/MyDrive/colab-notes/data/models/qwen38_27b_jev_final"
+) as client:
+    response = client.system_one(
+        state={
+            "user_id": "U-9402",
+            "text": "你们的扣费系统是不是有毛病？上周多扣了我两次费用，马上退款，否则投诉消协！",
+            "history_disputes": 0,
+        },
+        questions={
+            "asks_for_refund": Noul(
+                instructions="Does the customer explicitly demand a refund of money?"
+            ),
+            "routing_queue": Choice(
+                instructions="Which department should handle this request?",
+                criteria={
+                    "billing": "Issues with recurring payments, charges, cards, or receipts",
+                    "account_security": "Compromised accounts, password resets, 2FA failures",
+                    "technical_support": "App crashes, 5xx errors, API bugs",
+                    "general_inquiry": "Other non-urgent questions",
+                },
+            ),
+            "customer_frustration": Score(
+                instructions="Rate the level of user emotional frustration and hostility.",
+                criteria=[
+                    "Level 0: Calm, objective, neutral tone",
+                    "Level 1: Annoyed, mildly impatient but polite",
+                    "Level 2: Openly aggressive, angry, threatening legal or external escalations",
+                ],
+            ),
+        },
+    )
+print(response.answers["asks_for_refund"].noul)
+print(response.answers["routing_queue"].choice)
+print(response.answers["customer_frustration"].score)
+```
 
 ## Kev Decision Model 快速开始
 
@@ -117,6 +193,8 @@ print(response.answers["anger"].score)
 ```
 
 完整数据布局、4GB smoke 参数、HTTP `/v1/systemone` 服务和 TypeSafe 兼容说明见 [`docs/kev-lmml-migration.md`](docs/kev-lmml-migration.md)。
+
+Jev 正式数据准备的默认参数为 `preprocessing_num_proc=auto`（最多 8）、`tokenization_batch_size=512`、`shard_size=20000`、`progress_every=10000`。预处理产物保存预分词候选 `input_ids_flat` / `candidate_offsets` / `candidate_lengths`，训练时只做 padding，不再每个 epoch 重新 tokenize。详细配置见 `src/lmml/configs/data/jev_distill_v3.yaml`。
 
 ## MiniMind-3 快速开始
 

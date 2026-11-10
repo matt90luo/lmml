@@ -82,6 +82,16 @@ def run_data(cfg: DictConfig) -> dict:
             max_test_30k_samples=data.get("max_test_30k_samples"),
             max_ood_samples=data.get("max_ood_samples"),
             seed=int(cfg.seed),
+            preprocessing_num_proc=data.get("preprocessing_num_proc", "auto"),
+            tokenization_batch_size=int(data.get("tokenization_batch_size", 512)),
+            shard_size=int(data.get("shard_size", 20000)),
+            progress_every=int(data.get("progress_every", 10000)),
+            resume=str(data.get("resume", "auto")),
+            sampling_strategy=str(data.get("sampling_strategy", "reservoir")),
+            store_tokenized=bool(data.get("store_tokenized", True)),
+            tokenizer_name_or_path=tokenizer_name,
+            chat_end_token=chat_end,
+            trust_remote_code=bool(model_cfg.get("trust_remote_code", True)),
         )
         console.print(f"[bold green][lmml data][/bold green] summary: {summary}")
         return summary

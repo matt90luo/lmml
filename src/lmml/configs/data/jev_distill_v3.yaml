@@ -1,6 +1,13 @@
 task: jev
 prepared_path: ${paths.prepared_data_dir}/jev_distill_corpus_v3
 overwrite: true
+resume: auto
+sampling_strategy: reservoir
+store_tokenized: true
+preprocessing_num_proc: auto
+tokenization_batch_size: 512
+shard_size: 20000
+progress_every: 10000
 tokenizer_name_or_path: ${algo.model.name_or_path}
 sources:
   - path: ${paths.jev_data_dir}
@@ -11,8 +18,8 @@ filter_overlong: true
 strict_length: false
 training_sampling: source_kind_round_robin
 max_train_samples: null
-max_val_samples: 2000
-max_calibration_samples: 4000
+max_val_samples: null
+max_calibration_samples: null
 max_test_samples: null
 max_test_30k_samples: null
 max_ood_samples: null

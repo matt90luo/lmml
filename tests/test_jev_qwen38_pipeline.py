@@ -285,3 +285,110 @@ def test_jev_end_to_end_data_train_top2_calibrate_test_predict(tmp_path):
     assert 0.0 <= response.answers["asks_for_refund"].noul <= 1.0
     assert response.answers["routing_queue"].choice in {"billing", "account_security"}
     assert 0.0 <= response.answers["customer_frustration"].score <= 2.0
+
+
+def test_jev_pretokenized_arrow_sampling_and_resume(tmp_path, monkeypatch):
+    from datasets import load_from_disk
+
+    from lmml.core.llm.jev.data import JevCollator
+    from lmml.datas.llm import jev as jev_data
+
+    model_dir = create_tiny_qwen38_model_and_tokenizer(tmp_path / "tiny_qwen38")
+    tokenizer = build_sft_tokenizer(str(model_dir))
+    corpus = create_synthetic_jev_distill_v3(tmp_path / "jev-corpus", samples_per_split=20)
+    output = tmp_path / "prepared"
+
+    kwargs = {
+        "data_configs": [{"path": str(corpus)}],
+        "tokenizer": tokenizer,
+        "output_dir": output,
+        "max_length": 512,
+        "preprocessing_num_proc": 2,
+        "tokenization_batch_size": 4,
+        "shard_size": 5,
+        "progress_every": 5,
+        "max_train_samples": 7,
+        "max_val_samples": 4,
+        "max_calibration_samples": 4,
+        "max_test_samples": 4,
+        "max_test_30k_samples": 4,
+        "max_ood_samples": 4,
+        "tokenizer_name_or_path": str(model_dir),
+        "overwrite": True,
+    }
+
+    # Simulate an interruption after shards complete but before final assembly.
+    original_assemble = jev_data._assemble_split
+
+    def fail_assemble(*args, **kwargs):
+        raise RuntimeError("simulated interruption before final assembly")
+
+    monkeypatch.setattr(jev_data, "_assemble_split", fail_assemble)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        jev_data.prepare_jev_dataset(**kwargs)
+    staging = tmp_path / ".prepared.jev-staging"
+    assert staging.exists()
+
+    monkeypatch.setattr(jev_data, "_assemble_split", original_assemble)
+    summary = jev_data.prepare_jev_dataset(**kwargs)
+    assert summary["schema_version"] == jev_data.JEV_SCHEMA_VERSION
+    assert summary["train_samples"] == 7
+    assert summary["val_samples"] == 4
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == jev_data.JEV_SCHEMA_VERSION
+    assert manifest["splits"]["train"]["reused_shards"] > 0
+    assert manifest["splits"]["train"]["candidate_count"] > 0
+    assert manifest["splits"]["train"]["token_count"] > 0
+    assert not staging.exists()
+
+    dataset = load_from_disk(str(output))
+    row = dataset["train"][0]
+    assert "record_json" not in row
+    assert row["input_ids_flat"]
+    assert row["candidate_offsets"][0] == 0
+    assert row["candidate_offsets"][-1] == len(row["input_ids_flat"])
+    assert len(row["candidate_lengths"]) == len(row["candidate_offsets"]) - 1
+    assert max(row["candidate_lengths"]) <= 512
+
+    selected_ids = {dataset["train"][index]["id"] for index in range(len(dataset["train"]))}
+    first_ids = {f"train_{index}_{('noul', 'choice', 'score')[index % 3][0]}" for index in range(7)}
+    assert selected_ids != first_ids
+
+    collator = JevCollator(tokenizer, max_length=512, strict_length=True)
+    pretokenized_batch = collator([row])
+    raw_row = {
+        key: value
+        for key, value in row.items()
+        if key not in {"input_ids_flat", "candidate_offsets", "candidate_lengths"}
+    }
+    raw_row["state"] = json.loads(row["state"]) if row["state"].startswith("{") else row["state"]
+    raw_batch = collator([raw_row])
+    assert torch.equal(pretokenized_batch["input_ids"], raw_batch["input_ids"])
+    assert torch.equal(pretokenized_batch["attention_mask"], raw_batch["attention_mask"])
+
+    # A matching completed output is idempotent.
+    reused = jev_data.prepare_jev_dataset(**kwargs)
+    assert reused["reused"] is True
+    assert reused["train_samples"] == 7
+
+
+def test_jev_data_config_defaults():
+    with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
+        full = compose(config_name="config", overrides=["command=data", "experiment=qwen38_27B_jev"])
+        assert full.data.task == "jev"
+        assert full.data.preprocessing_num_proc == "auto"
+        assert full.data.tokenization_batch_size == 512
+        assert full.data.shard_size == 20000
+        assert full.data.progress_every == 10000
+        assert full.data.resume == "auto"
+        assert full.data.store_tokenized is True
+        assert full.data.max_train_samples is None
+        assert full.data.max_val_samples is None
+        assert full.data.max_calibration_samples is None
+
+        smoke = compose(config_name="config", overrides=["command=data", "experiment=qwen38_27B_jev_smoke"])
+        assert smoke.data.preprocessing_num_proc == 1
+        assert smoke.data.max_train_samples == 16
+        assert smoke.data.max_val_samples == 8
+        assert smoke.data.max_calibration_samples == 8

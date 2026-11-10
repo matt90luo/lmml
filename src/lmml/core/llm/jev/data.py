@@ -36,7 +36,7 @@ class JevArrowDataset(Dataset):
 
 
 class JevCollator:
-    """Collate Jev records by rendering candidate prompts with chat_template and right-padding."""
+    """Pad pre-tokenized candidates, with a legacy on-the-fly tokenization fallback."""
 
     def __init__(
         self,
@@ -54,6 +54,67 @@ class JevCollator:
 
     def __call__(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
         records: list[dict[str, Any]] = [_parse_row(item) for item in batch]
+        if records and all("input_ids_flat" in record for record in records):
+            return self._collate_pretokenized(records)
+        return self._collate_records(records)
+
+    def _collate_pretokenized(self, records: list[dict[str, Any]]) -> dict[str, Any]:
+        """Pad pre-tokenized candidate IDs without invoking the tokenizer again."""
+        pad_id = int(self.tokenizer.pad_token_id)
+        lengths_per_row: list[list[int]] = []
+        counts: list[int] = []
+        kinds: list[str] = []
+        targets: list[list[float]] = []
+        rows: list[list[list[int]]] = []
+        max_width = 0
+        for record in records:
+            lengths = [int(value) for value in record["candidate_lengths"]]
+            offsets = [int(value) for value in record["candidate_offsets"]]
+            flat = [int(value) for value in record["input_ids_flat"]]
+            if len(offsets) != len(lengths) + 1 or offsets[0] != 0 or offsets[-1] != len(flat):
+                raise ValueError(f"invalid pre-tokenized offsets for row {record.get('id', '<unknown>')}")
+            candidates: list[list[int]] = []
+            for index, length in enumerate(lengths):
+                start, end = offsets[index], offsets[index + 1]
+                if end - start != length or length <= 0:
+                    raise ValueError(f"invalid pre-tokenized length for row {record.get('id', '<unknown>')}")
+                candidate = flat[start:end]
+                if len(candidate) > self.max_length:
+                    if self.strict_length:
+                        raise ValueError(
+                            f"Input length {len(candidate)} exceeds max_length={self.max_length}; no silent truncation"
+                        )
+                    candidate = candidate[: self.max_length]
+                candidates.append(candidate)
+                max_width = max(max_width, len(candidate))
+            rows.append(candidates)
+            lengths_per_row.append([len(candidate) for candidate in candidates])
+            counts.append(len(candidates))
+            kinds.append(str(record["kind"]))
+            if "target" in record and record["target"] is not None:
+                targets.append([float(x) for x in record["target"]])
+        input_ids = torch.full((sum(counts), max_width), pad_id, dtype=torch.long)
+        attention_mask = torch.zeros((sum(counts), max_width), dtype=torch.long)
+        lengths: list[int] = []
+        cursor = 0
+        for candidates, row_lengths in zip(rows, lengths_per_row):
+            for candidate, length in zip(candidates, row_lengths):
+                if length:
+                    input_ids[cursor, :length] = torch.tensor(candidate, dtype=torch.long)
+                    attention_mask[cursor, :length] = 1
+                lengths.append(length)
+                cursor += 1
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "lengths": torch.tensor(lengths, dtype=torch.long),
+            "counts": counts,
+            "kinds": kinds,
+            "targets": targets,
+            "records": records,
+        }
+
+    def _collate_records(self, records: list[dict[str, Any]]) -> dict[str, Any]:
         prompts: list[str] = []
         counts: list[int] = []
         kinds: list[str] = []

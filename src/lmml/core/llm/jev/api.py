@@ -95,15 +95,24 @@ def compile_request(state: Any, questions: Mapping[str, Any]) -> list[dict[str, 
     return records
 
 
-def candidate_prompts(record: Mapping[str, Any]) -> list[str]:
-    """Render independent candidates using only declared model input fields."""
-    prefix = f"Context:\n{_render(record['state'])}\n\nQuestion: {_render(record['question'])}\n"
+def candidate_prefix(record: Mapping[str, Any]) -> str:
+    """Render the shared state + question prefix once for all candidates."""
+    return f"Context:\n{_render(record['state'])}\n\nQuestion: {_render(record['question'])}\n"
+
+
+def candidate_prompts_from_prefix(record: Mapping[str, Any], prefix: str) -> list[str]:
+    """Append candidate-specific suffixes to a shared rendered prefix."""
     if record["kind"] == "noul":
         return [prefix + "Is the answer to this question yes? Answer Yes or No."]
     return [
         prefix + f"Proposed answer: {_render(option)}\nIs this proposed answer correct? Answer Yes or No."
         for option in record["options"]
     ]
+
+
+def candidate_prompts(record: Mapping[str, Any]) -> list[str]:
+    """Render independent candidates using only declared model input fields."""
+    return candidate_prompts_from_prefix(record, candidate_prefix(record))
 
 
 def apply_candidate_chat_template(tokenizer: Any, prompt: str) -> str:
@@ -187,7 +196,9 @@ __all__ = [
     "SystemOneRequest",
     "SystemOneResponse",
     "apply_candidate_chat_template",
+    "candidate_prefix",
     "candidate_prompts",
+    "candidate_prompts_from_prefix",
     "compile_request",
     "format_response",
 ]
