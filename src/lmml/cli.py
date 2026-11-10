@@ -45,6 +45,12 @@ Examples:
   lmml train experiment=kev_08b_lora
   lmml predict experiment=kev_08b_lora ckpt_path=/content/kev_08b_lora_final
 
+  # Jev decision model (Qwen3.8-27B + Rank-32 LoRA + FP32 Scalar Head)
+  lmml data experiment=qwen38_27B_jev
+  lmml train experiment=qwen38_27B_jev
+  lmml test experiment=qwen38_27B_jev ckpt_path=/content/drive/MyDrive/colab-notes/data/models/qwen38_27b_jev_final
+  lmml predict experiment=qwen38_27B_jev ckpt_path=/content/drive/MyDrive/colab-notes/data/models/qwen38_27b_jev_final
+
   # RL (Rainbow DQN)
   lmml train experiment=rainbow_gridworld_online
   lmml train data=offline data.offline_path=data/grid.npz net=transformer

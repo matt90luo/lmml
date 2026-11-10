@@ -23,6 +23,7 @@ paths:
   base_data_dir: /content/drive/MyDrive/colab-notes/data/datasets
   base_model_dir: /content/drive/MyDrive/colab-notes/data/models
   kev_data_dir: ${paths.base_data_dir}/kev-suits
+  jev_data_dir: ${paths.base_data_dir}/jev-distill-corpus-v3
   prepared_data_dir: ${paths.base_data_dir}/prepared
 
 eval:

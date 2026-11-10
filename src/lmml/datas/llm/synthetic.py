@@ -337,3 +337,212 @@ def create_synthetic_minimind_datasets(
                 + "\n"
             )
     return paths
+
+
+QWEN38_CHAT_TEMPLATE = (
+    "{%- for message in messages %}"
+    "{{ '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>\\n' }}"
+    "{%- endfor %}"
+    "{%- if add_generation_prompt %}"
+    "{{ '<|im_start|>assistant\\n' }}"
+    "{%- if enable_thinking is defined and enable_thinking is false %}"
+    "{{ '<think>\\n\\n</think>\\n\\n' }}"
+    "{%- else %}"
+    "{{ '<think>\\n' }}"
+    "{%- endif %}"
+    "{%- endif %}"
+)
+
+
+def create_tiny_qwen38_model_and_tokenizer(
+    save_dir: str | Path,
+    hidden_size: int = 64,
+    intermediate_size: int = 128,
+    num_hidden_layers: int = 4,
+    num_attention_heads: int = 4,
+    num_key_value_heads: int = 2,
+) -> Path:
+    """Create an offline miniature Qwen3.8 (Qwen3_5ForConditionalGeneration) with 3x linear_attention + 1x full_attention."""
+    from transformers import AutoConfig, AutoModelForImageTextToText
+
+    from lmml.core.llm.jev.model import ensure_qwen35_cpu_linear_attention_fallback
+
+    ensure_qwen35_cpu_linear_attention_fallback()
+    out_dir = Path(save_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    base_words = [
+        "<pad>",
+        "<unk>",
+        "<|im_start|>",
+        "<|im_end|>",
+        "<think>",
+        "</think>",
+        "Yes",
+        "No",
+        "yes",
+        "no",
+        "true",
+        "false",
+        "Context:",
+        "Question:",
+        "Proposed",
+        "answer:",
+        "Is",
+        "this",
+        "proposed",
+        "answer",
+        "correct?",
+        "Answer",
+        "or",
+        "No.",
+        "the",
+        "to",
+        "question",
+        "yes?",
+        "system",
+        "user",
+        "assistant",
+        "billing",
+        "account_security",
+        "technical_support",
+        "general_inquiry",
+        "refund",
+        "customer",
+        "charged",
+        "twice",
+    ]
+    for idx in range(256):
+        tok = f"tok_{idx}"
+        if tok not in base_words:
+            base_words.append(tok)
+
+    vocab = {w: i for i, w in enumerate(base_words)}
+    tok_obj = Tokenizer(WordLevel(vocab=vocab, unk_token="<unk>"))
+    tok_obj.pre_tokenizer = Whitespace()
+
+    fast_tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=tok_obj,
+        unk_token="<unk>",
+        pad_token="<|im_end|>",
+        eos_token="<|im_end|>",
+        bos_token="<|im_start|>",
+        additional_special_tokens=["<|im_start|>", "<|im_end|>", "<think>", "</think>"],
+        chat_template=QWEN38_CHAT_TEMPLATE,
+    )
+    fast_tokenizer.save_pretrained(str(out_dir))
+    (out_dir / "chat_template.jinja").write_text(QWEN38_CHAT_TEMPLATE, encoding="utf-8")
+
+    layer_types = [
+        "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
+        for i in range(num_hidden_layers)
+    ]
+    head_dim = max(16, hidden_size // num_attention_heads)
+    raw_cfg = {
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "model_type": "qwen3_5",
+        "image_token_id": len(vocab) - 2,
+        "video_token_id": len(vocab) - 1,
+        "vision_start_token_id": len(vocab) - 4,
+        "vision_end_token_id": len(vocab) - 3,
+        "tie_word_embeddings": False,
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "vocab_size": len(vocab),
+            "hidden_size": hidden_size,
+            "intermediate_size": intermediate_size,
+            "num_hidden_layers": num_hidden_layers,
+            "layer_types": layer_types,
+            "full_attention_interval": 4,
+            "num_attention_heads": num_attention_heads,
+            "num_key_value_heads": num_key_value_heads,
+            "head_dim": head_dim,
+            "attention_bias": False,
+            "attention_dropout": 0.0,
+            "attn_output_gate": True,
+            "output_gate_type": "swish",
+            "hidden_act": "silu",
+            "linear_conv_kernel_dim": 4,
+            "linear_num_key_heads": 2,
+            "linear_key_head_dim": 16,
+            "linear_num_value_heads": 4,
+            "linear_value_head_dim": 16,
+            "mamba_ssm_dtype": "float32",
+            "max_position_embeddings": 4096,
+            "partial_rotary_factor": 0.25,
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": {
+                "mrope_interleaved": True,
+                "mrope_section": [1, 1, 0],
+                "partial_rotary_factor": 0.25,
+                "rope_theta": 10000000,
+                "rope_type": "default",
+            },
+            "bos_token_id": vocab["<|im_start|>"],
+            "eos_token_id": vocab["<|im_end|>"],
+            "pad_token_id": vocab["<|im_end|>"],
+            "tie_word_embeddings": False,
+            "use_cache": False,
+            "dtype": "float32",
+        },
+        "vision_config": {
+            "model_type": "qwen3_5",
+            "depth": 1,
+            "hidden_size": 32,
+            "intermediate_size": 64,
+            "num_heads": 4,
+            "out_hidden_size": hidden_size,
+            "in_channels": 3,
+            "patch_size": 16,
+            "spatial_merge_size": 2,
+            "temporal_patch_size": 2,
+            "num_position_embeddings": 64,
+            "deepstack_visual_indexes": [],
+        },
+    }
+    cfg = AutoConfig.for_model(**raw_cfg)
+    model = AutoModelForImageTextToText.from_config(cfg)
+    model.save_pretrained(str(out_dir), safe_serialization=True)
+    return out_dir
+
+
+def create_synthetic_jev_distill_v3(
+    root: str | Path,
+    samples_per_split: int = 6,
+) -> Path:
+    """Create synthetic SargeDev/jev-distill-corpus-v3 splits (train, validation, calibration, test, test_set_30k, ood)."""
+    base = Path(root)
+    base.mkdir(parents=True, exist_ok=True)
+    splits = ("train", "validation", "calibration", "test", "test_set_30k", "ood")
+    for split in splits:
+        path = base / f"{split}.jsonl"
+        with path.open("w", encoding="utf-8") as handle:
+            for idx in range(samples_per_split):
+                kind = ("noul", "choice", "score")[idx % 3]
+                if split == "ood":
+                    kind = "noul" if idx % 2 == 0 else "choice"
+                if kind == "noul":
+                    options = ["false", "true"]
+                    target = [0.15, 0.85] if idx % 2 == 0 else [0.9, 0.1]
+                    question = f"Does customer {idx} explicitly demand a refund?"
+                elif kind == "choice":
+                    options = ["billing", "account_security", "technical_support"]
+                    target = [0.8, 0.1, 0.1] if idx % 2 == 0 else [0.1, 0.75, 0.15]
+                    question = f"Which department should handle ticket {idx}?"
+                else:
+                    options = ["0", "1", "2"]
+                    target = [0.1, 0.2, 0.7] if idx % 2 == 0 else [0.7, 0.2, 0.1]
+                    question = f"Rate frustration level for ticket {idx}."
+                row = {
+                    "id": f"{split}_{idx}_{kind[0]}",
+                    "kind": kind,
+                    "options": options,
+                    "target": target,
+                    "state": f"Customer {idx} was charged twice on invoice and requests immediate action.",
+                    "question": question,
+                    "domain": "support_triage" if split != "ood" else "painting-geometry-v1",
+                    "family": "business" if split != "ood" else "openjev",
+                    "source": "yuri_v3" if split != "ood" else "openjev_v2",
+                }
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return base

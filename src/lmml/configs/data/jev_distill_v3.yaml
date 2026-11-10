@@ -1,0 +1,46 @@
+task: jev
+prepared_path: ${paths.prepared_data_dir}/jev_distill_corpus_v3
+overwrite: true
+tokenizer_name_or_path: ${algo.model.name_or_path}
+sources:
+  - path: ${paths.jev_data_dir}
+    max_samples: null
+    sample_ratio: 1.0
+max_length: 512
+filter_overlong: true
+strict_length: false
+training_sampling: source_kind_round_robin
+max_train_samples: null
+max_val_samples: 2000
+max_calibration_samples: 4000
+max_test_samples: null
+max_test_30k_samples: null
+max_ood_samples: null
+batch_size: 1
+val_batch_size: 1
+num_workers: 0
+chat_end_token: "<|im_end|>"
+predict_requests:
+  - state:
+      user_id: U-9402
+      text: 你们的扣费系统是不是有毛病？上周多扣了我两次费用，马上退款，否则投诉消协！
+      history_disputes: 0
+    questions:
+      asks_for_refund:
+        type: noul
+        instructions: Does the customer explicitly demand a refund of money?
+      routing_queue:
+        type: choice
+        instructions: Which department should handle this request?
+        criteria:
+          billing: Issues with recurring payments, charges, cards, or receipts
+          account_security: Compromised accounts, password resets, 2FA failures
+          technical_support: App crashes, 5xx errors, API bugs
+          general_inquiry: Other non-urgent questions
+      customer_frustration:
+        type: score
+        instructions: Rate the level of user emotional frustration and hostility.
+        criteria:
+          - "Level 0: Calm, objective, neutral tone"
+          - "Level 1: Annoyed, mildly impatient but polite"
+          - "Level 2: Openly aggressive, angry, threatening legal or external escalations"

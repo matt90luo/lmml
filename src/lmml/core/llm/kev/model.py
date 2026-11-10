@@ -278,6 +278,10 @@ class KevDecisionModel(nn.Module):
             )
             self.lm = getattr(loaded, "language_model", loaded)
         self.hybrid = is_hybrid(self.lm.config)
+        if self.hybrid:
+            from lmml.core.llm.jev.model import ensure_qwen35_cpu_linear_attention_fallback
+
+            ensure_qwen35_cpu_linear_attention_fallback()
         if self.hybrid and self.option_isolation:
             raise ValueError("option_isolation is unavailable on hybrid Qwen3.5 backbones")
         if gradient_checkpointing:

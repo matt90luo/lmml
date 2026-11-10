@@ -13,6 +13,7 @@ from rich.console import Console
 from lmml.core.callbacks import build_rich_callbacks
 from lmml.core.logging import build_logger, finish_logger
 from lmml.core.recipe import Recipe
+from lmml.datas.llm.jev import prepare_jev_dataset
 from lmml.datas.llm.kev import prepare_kev_dataset
 from lmml.datas.llm.prepare import prepare_llm_dataset
 from lmml.datas.llm.sft import build_sft_tokenizer
@@ -64,6 +65,26 @@ def run_data(cfg: DictConfig) -> dict:
     prepared_path = data.get("prepared_path")
     if not prepared_path:
         raise ValueError("`lmml data` 必须配置 data.prepared_path。")
+
+    if str(data.get("task", "sft")).lower() == "jev":
+        summary = prepare_jev_dataset(
+            data_configs=raw_sources,
+            tokenizer=tokenizer,
+            output_dir=str(prepared_path),
+            overwrite=bool(data.get("overwrite", True)),
+            max_length=int(data.get("max_length", 512)),
+            filter_overlong=bool(data.get("filter_overlong", True)),
+            training_sampling=str(data.get("training_sampling", "source_kind_round_robin")),
+            max_train_samples=data.get("max_train_samples"),
+            max_val_samples=data.get("max_val_samples"),
+            max_calibration_samples=data.get("max_calibration_samples"),
+            max_test_samples=data.get("max_test_samples"),
+            max_test_30k_samples=data.get("max_test_30k_samples"),
+            max_ood_samples=data.get("max_ood_samples"),
+            seed=int(cfg.seed),
+        )
+        console.print(f"[bold green][lmml data][/bold green] summary: {summary}")
+        return summary
 
     if str(data.get("task", "sft")).lower() == "kev":
         fallback_raw = data.get("fallback_sources", [])

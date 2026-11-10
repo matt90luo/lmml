@@ -27,7 +27,7 @@ from lmml.datas.llm.sft import (
 
 console = Console()
 
-PREPARE_TASKS = ("pretrain", "sft", "dpo", "ppo", "grpo", "agent_rl", "kev")
+PREPARE_TASKS = ("pretrain", "sft", "dpo", "ppo", "grpo", "agent_rl", "kev", "jev")
 
 
 def _normalize_messages(value: Any, *, default_role: str | None = None) -> list[dict[str, str]]:

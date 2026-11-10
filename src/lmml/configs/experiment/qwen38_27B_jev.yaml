@@ -1,0 +1,42 @@
+# @package _global_
+defaults:
+  - override /recipe: jev_decision
+  - override /algo: qwen38_27b_jev_lora
+  - override /data: jev_distill_v3
+  - override /trainer: colab_sft
+  - override /net: null
+  - override /env: null
+  - override /collect: null
+
+optimized_metric: val/loss
+
+eval:
+  enabled: false
+  after_train: false
+  splits:
+    - test
+    - test_set_30k
+    - ood
+  max_samples: null
+  batch_size: 1
+
+callbacks:
+  checkpoint:
+    enabled: true
+    dirpath: ${paths.base_model_dir}/checkpoints_qwen38_27b_jev
+    filename: qwen38-27b-jev-{epoch:02d}-{step:06d}
+    monitor: val/loss
+    mode: min
+    save_top_k: 2
+    save_last: false
+    save_weights_only: true
+
+logger:
+  project: lmml-projects
+  name: qwen38-27b-jev-lora
+  tags:
+    - llm
+    - jev
+    - decision-model
+    - qwen3.8-27b
+    - lora

@@ -1,0 +1,9 @@
+defaults:
+  - jev_distill_v3
+prepared_path: ${paths.prepared_data_dir}/jev_smoke
+max_train_samples: 16
+max_val_samples: 8
+max_calibration_samples: 8
+max_test_samples: 8
+max_test_30k_samples: 8
+max_ood_samples: 8

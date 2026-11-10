@@ -1,0 +1,38 @@
+mode: lora
+lr: 2.0e-4
+head_lr: 2.0e-4
+weight_decay: 0.01
+warmup_ratio: 0.05
+matmul_precision: high
+brier_weight: 0.1
+lora_r: 32
+lora_alpha: 64
+lora_dropout: 0.05
+lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  - in_proj_qkv
+  - in_proj_z
+  - in_proj_a
+  - in_proj_b
+  - out_proj
+lora_checkpoint_dir: null
+init_from: null
+model:
+  name_or_path: ${paths.base_model_dir}/Qwen3.8-27B
+  attn_implementation: sdpa
+  torch_dtype: bfloat16
+  use_gradient_checkpointing: true
+  trust_remote_code: true
+calibration:
+  enabled: true
+  max_samples: 4000
+  batch_size: 1
+export:
+  enabled: true
+  save_dir: ${paths.base_model_dir}/qwen38_27b_jev_final

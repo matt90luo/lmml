@@ -1,0 +1,45 @@
+# @package _global_
+defaults:
+  - override /recipe: jev_decision
+  - override /algo: qwen38_27b_jev_lora
+  - override /data: jev_smoke
+  - override /trainer: debug
+  - override /net: null
+  - override /env: null
+  - override /collect: null
+
+optimized_metric: val/loss
+
+eval:
+  enabled: false
+  after_train: true
+  splits:
+    - test
+    - test_set_30k
+    - ood
+  max_samples: 8
+  batch_size: 2
+
+algo:
+  calibration:
+    max_samples: 8
+    batch_size: 2
+
+callbacks:
+  checkpoint:
+    enabled: true
+    dirpath: ${paths.base_model_dir}/checkpoints_qwen38_27b_jev_smoke
+    filename: qwen38-27b-jev-smoke-{epoch:02d}-{step:06d}
+    monitor: val/loss
+    mode: min
+    save_top_k: 2
+    save_last: false
+    save_weights_only: true
+
+logger:
+  project: lmml-projects
+  name: qwen38-27b-jev-smoke
+  tags:
+    - llm
+    - jev
+    - smoke
