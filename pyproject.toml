@@ -18,10 +18,27 @@ dependencies = [
     "rich",
     "safetensors",
     "torch",
+    "flash-attn",
     "torchao>=0.16.0",
     "transformers",
     "wandb",
+    "liger-kernel"
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }
+flash-attn = { index = "astral-cu132" }
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[[tool.uv.index]]
+name = "astral-cu132"
+url = "https://wheels.astral.sh/simple/cu132/"
+explicit = true
+
 
 # 注册命令行 CLI 命令
 [project.scripts]

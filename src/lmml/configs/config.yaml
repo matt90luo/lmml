@@ -20,8 +20,12 @@ optimized_metric: val/episode_return
 
 paths:
   base_dir: /content
+  # 权重通过 `hf download ... --local-dir /content/<model>` 放在本地 /content；
+  # 数据集仍保留在 Google Drive，避免改变现有数据路径。
   base_data_dir: /content/drive/MyDrive/colab-notes/data/datasets
-  base_model_dir: /content/drive/MyDrive/colab-notes/data/models
+  # 基座权重从 HF 下载到本地 /content；训练产物仍写回 Google Drive。
+  base_model_dir: /content
+  output_model_dir: /content/drive/MyDrive/colab-notes/data/models
   kev_data_dir: ${paths.base_data_dir}/kev-suits
   jev_data_dir: ${paths.base_data_dir}/jev-distill-corpus-v3
   prepared_data_dir: ${paths.base_data_dir}/prepared

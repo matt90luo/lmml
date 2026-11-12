@@ -21,25 +21,26 @@
 
 ## 2. 数据布局
 
-默认沿用 Colab / Google Drive：
+默认沿用 Colab 本地权重 `/content` 与 Google Drive 数据：
 
 ```text
+/content/
+├── minimind-3/
+└── minimind-3-moe/
+
 /content/drive/MyDrive/colab-notes/data/
-├── datasets/minimind_dataset/
-│   ├── pretrain_t2t_mini.jsonl
-│   ├── pretrain_t2t.jsonl
-│   ├── sft_t2t_mini.jsonl
-│   ├── sft_t2t.jsonl
-│   ├── dpo.jsonl
-│   ├── rlaif.jsonl
-│   ├── agent_rl.jsonl
-│   └── agent_rl_math.jsonl
-└── models/
-    ├── minimind-3/
-    └── minimind-3-moe/
+└── datasets/minimind_dataset/
+    ├── pretrain_t2t_mini.jsonl
+    ├── pretrain_t2t.jsonl
+    ├── sft_t2t_mini.jsonl
+    ├── sft_t2t.jsonl
+    ├── dpo.jsonl
+    ├── rlaif.jsonl
+    ├── agent_rl.jsonl
+    └── agent_rl_math.jsonl
 ```
 
-`minimind-3` / `minimind-3-moe` 目录只需要提供 tokenizer 时，Pretrain 会按代码中的配置随机初始化模型。后续阶段默认从 `paths.base_model_dir` 中的 Hugging Face 模型或上一阶段导出的目录加载。
+`minimind-3` / `minimind-3-moe` 目录只需要提供 tokenizer 时，Pretrain 会按代码中的配置随机初始化模型。后续阶段默认从 `paths.base_model_dir`（本地 `/content`）中的 Hugging Face 模型或 `paths.base_dir` 中上一阶段导出的目录加载。
 
 仓库内置了 MiniMind tokenizer 作为离线兜底；当配置路径包含 `minimind` 且该路径不存在时，会使用 `src/lmml/assets/minimind/`。
 
@@ -107,7 +108,7 @@ lmml train experiment=minimind3_moe_agent_rl
 
 ```bash
 lmml train experiment=minimind3_ppo \
-  algo.model.name_or_path=/content/drive/MyDrive/colab-notes/data/models/smoke_sft_final
+  algo.model.name_or_path=/content/smoke_sft_final
 ```
 
 每个 Recipe 在 `on_fit_end` 自动导出 Hugging Face 模型和 tokenizer 到 `algo.export.save_dir`。
@@ -131,7 +132,7 @@ algo:
 ```bash
 lmml train experiment=minimind3_grpo \
   algo.reward_mode=hf \
-  algo.reward_model_path=/content/drive/MyDrive/colab-notes/data/models/internlm2-1_8b-reward
+  algo.reward_model_path=/content/internlm2-1_8b-reward
 ```
 
 ## 6. 4GB 显存与 CPU 冒烟测试

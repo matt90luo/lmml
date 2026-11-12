@@ -23,22 +23,23 @@ state + <q> instruction <opt> option 0 </opt> ... <decide>
 
 ## 2. 数据布局
 
-Google Drive 默认路径：
+默认路径（基座权重在本地 `/content`，数据在 Google Drive）：
 
 ```text
+/content/
+├── Qwen3.5-0.8B-Base/
+└── Qwen3.5-4B-Base/
+
 /content/drive/MyDrive/colab-notes/data/
-├── datasets/kev-suits/
-│   ├── v7/decision-v7/
-│   ├── documents-v1/
-│   ├── hard-v1/
-│   ├── decision-v2/
-│   └── v3/decision-v3/
-└── models/
-    ├── Qwen3.5-0.8B-Base/
-    └── Qwen3.5-4B-Base/
+└── datasets/kev-suits/
+    ├── v7/decision-v7/
+    ├── documents-v1/
+    ├── hard-v1/
+    ├── decision-v2/
+    └── v3/decision-v3/
 ```
 
-默认 `kev_suits` 配置会读取 `v7/decision-v7`、`documents-v1`、`hard-v1`；当主套件没有 `train.jsonl` 时，自动回退到 `decision-v2` / `v3/decision-v3` 的 `train.jsonl`。所有记录都会做：
+权重默认放在 `/content`，数据仍从 Google Drive 读取。默认 `kev_suits` 配置会读取 `v7/decision-v7`、`documents-v1`、`hard-v1`；当主套件没有 `train.jsonl` 时，自动回退到 `decision-v2` / `v3/decision-v3` 的 `train.jsonl`。所有记录都会做：
 
 - manifest 的 eval-only / holdout 来源检查；
 - 同 split 内 state 去重；
@@ -178,7 +179,7 @@ HTTP 服务实现 `POST /v1/systemone`、`GET /v1/models`，并返回 `x-typesaf
 - 本机 PyTorch 报告 `cuda_available=False`，NVML 不可用，因此无法实际执行 4GB GPU smoke。
 - 已完成 CPU 验证：真实 `Qwen3.5-0.8B-Base` 的 hybrid 前向、LoRA 装配、Kev 数据准备、单步训练、分批温度校准、检查点导出、CLI predict 与进程内 SDK。
 - 本轮校准修复覆盖分批前向、空校准集、失败时导出 `temperature=1.0` 和 WandB exit code；Ruff：`All checks passed`。
-- 本机完整 `pytest` 为 `57 passed`；Ruff 与 `git diff --check` 通过。
+- 本机完整 `pytest` 为 `58 passed`；Ruff 与 `git diff --check` 通过。
 - Jev 数据准备已用真实 `jev-distill-corpus-v3` 的小样本完成 CPU 验证：批量预分词、Arrow shard、reservoir sampling、manifest 与完成态复用均通过；真实 4GB GPU smoke 仍待可用 CUDA 主机执行。
 
 
@@ -201,6 +202,6 @@ HTTP 服务实现 `POST /v1/systemone`、`GET /v1/models`，并返回 `x-typesaf
   - 正式配置使用完整 validation / calibration / test / test_set_30k / ood；smoke 配置单独限制小样本；
   - 新产物不再保存重复的 `record_json`，而是保存结构化列和预分词字段；旧 `record_json` 数据仍可由 collator 兼容读取。
 - **三阶段流程**：
-  - **阶段一（训练）**：在 `train.jsonl` 上更新，在 `validation.jsonl` 上监控 `val/loss`，自动将最优 Top-2 检查点保存在 `${paths.base_model_dir}/checkpoints_qwen38_27b_jev`（含轻量 `.ckpt` 与 `top1_*` / `top2_*` PEFT 目录）；
+  - **阶段一（训练）**：在 `train.jsonl` 上更新，在 `validation.jsonl` 上监控 `val/loss`，自动将最优 Top-2 检查点保存在 `${paths.output_model_dir}/checkpoints_qwen38_27b_jev`（含轻量 `.ckpt` 与 `top1_*` / `top2_*` PEFT 目录）；
   - **阶段二（校准）**：在 `calibration.jsonl` 上拟合最优正温度系数 `T` 以压低 ECE，写入 `temperature.json`；
   - **阶段三（验收）**：通过 `lmml test experiment=qwen38_27B_jev`（或 `eval.after_train=true`）依次评测 `test.jsonl`（功能与吞吐）、`test_set_30k.jsonl`（Jev Decision Index 指标）与 `ood.jsonl`（System 1/2 升级触发率与抗盲目自信指标）。

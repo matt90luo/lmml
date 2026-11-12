@@ -392,3 +392,32 @@ def test_jev_data_config_defaults():
         assert smoke.data.max_train_samples == 16
         assert smoke.data.max_val_samples == 8
         assert smoke.data.max_calibration_samples == 8
+
+
+def test_llm_experiments_load_base_weights_from_local_content():
+    experiments = (
+        "qwen35_lora_sft",
+        "qwen35_full_sft",
+        "kev_08b_lora",
+        "kev_08b_full",
+        "kev_4b_lora",
+        "qwen38_27B_jev",
+        "minimind3_pretrain",
+        "minimind3_full_sft",
+        "minimind3_moe_pretrain",
+        "minimind3_moe_full_sft",
+        "minimind3_ppo",
+        "minimind3_grpo",
+        "minimind3_agent_rl",
+    )
+    with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
+        for experiment in experiments:
+            cfg = compose(config_name="config", overrides=["command=train", f"experiment={experiment}"])
+            assert str(cfg.paths.base_model_dir) == "/content"
+            assert str(cfg.algo.model.name_or_path).startswith("/content/")
+
+        jev = compose(config_name="config", overrides=["command=train", "experiment=qwen38_27B_jev"])
+        assert str(jev.algo.model.name_or_path) == "/content/Qwen3.8-27B"
+        assert str(jev.paths.output_model_dir) == "/content/drive/MyDrive/colab-notes/data/models"
+        assert str(jev.callbacks.checkpoint.dirpath).startswith(str(jev.paths.output_model_dir))
+        assert str(jev.algo.export.save_dir).startswith(str(jev.paths.output_model_dir))

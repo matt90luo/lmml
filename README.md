@@ -57,7 +57,7 @@ lmml data experiment=qwen35_lora_sft \
   data.overwrite=true
 lmml train experiment=qwen35_lora_sft \
   paths.base_data_dir=/content/drive/MyDrive/colab-notes/data/datasets \
-  paths.base_model_dir=/content/drive/MyDrive/colab-notes/data/models \
+  paths.base_model_dir=/content \
   algo.lr=2e-4 data.batch_size=8
 
 # 4. Rainbow DQN 训练与离线数据采样
@@ -73,6 +73,9 @@ lmml train experiment=rainbow_gridworld_warmup data.offline_path=data/grid.npz d
 基于 `Qwen3.8-27B` (`Qwen3_5ForConditionalGeneration` 提取 `language_model`) 与 `SargeDev/jev-distill-corpus-v3` 数据集的独立候选打分型 Decision Model：
 
 ```bash
+# 0. 权重下载到本地 /content（比直接读取 Google Drive 挂载目录更快）
+hf download Qwen/Qwen3.8-27B --local-dir /content/Qwen3.8-27B
+
 # 1. 准备数据（读取 Google Drive 上的 jev-distill-corpus-v3 六个 split）
 #    默认流式分片 + 批量预分词 + 最多 8 进程；中断后重复执行会复用已完成 shard
 lmml data experiment=qwen38_27B_jev
@@ -195,6 +198,8 @@ print(response.answers["anger"].score)
 完整数据布局、4GB smoke 参数、HTTP `/v1/systemone` 服务和 TypeSafe 兼容说明见 [`docs/kev-lmml-migration.md`](docs/kev-lmml-migration.md)。
 
 Jev 正式数据准备的默认参数为 `preprocessing_num_proc=auto`（最多 8）、`tokenization_batch_size=512`、`shard_size=20000`、`progress_every=10000`。预处理产物保存预分词候选 `input_ids_flat` / `candidate_offsets` / `candidate_lengths`，训练时只做 padding，不再每个 epoch 重新 tokenize。详细配置见 `src/lmml/configs/data/jev_distill_v3.yaml`。
+
+基座权重默认从本地 `/content/<model>` 加载；训练检查点与最终导出仍保存到 `${paths.output_model_dir}`（默认 Google Drive）。可通过 `paths.base_model_dir` 覆盖基座目录，通过 `paths.output_model_dir` 覆盖产物目录。
 
 ## MiniMind-3 快速开始
 

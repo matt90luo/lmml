@@ -35,4 +35,4 @@ calibration:
   batch_size: 1
 export:
   enabled: true
-  save_dir: ${paths.base_model_dir}/qwen38_27b_jev_final
+  save_dir: ${paths.output_model_dir}/qwen38_27b_jev_final

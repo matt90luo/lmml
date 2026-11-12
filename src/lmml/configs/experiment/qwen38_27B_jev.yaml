@@ -23,7 +23,7 @@ eval:
 callbacks:
   checkpoint:
     enabled: true
-    dirpath: ${paths.base_model_dir}/checkpoints_qwen38_27b_jev
+    dirpath: ${paths.output_model_dir}/checkpoints_qwen38_27b_jev
     filename: qwen38-27b-jev-{epoch:02d}-{step:06d}
     monitor: val/loss
     mode: min

@@ -28,7 +28,7 @@ algo:
 callbacks:
   checkpoint:
     enabled: true
-    dirpath: ${paths.base_model_dir}/checkpoints_qwen38_27b_jev_smoke
+    dirpath: ${paths.output_model_dir}/checkpoints_qwen38_27b_jev_smoke
     filename: qwen38-27b-jev-smoke-{epoch:02d}-{step:06d}
     monitor: val/loss
     mode: min
