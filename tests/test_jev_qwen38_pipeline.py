@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
+from datasets import Dataset, DatasetDict
 from hydra import compose, initialize_config_module
 from peft import LoraConfig
 
 from lmml.core.llm.jev import (
     Choice,
+    JevDataModule,
+    JevDecisionRecipe,
     Noul,
     QwenLoraLightningModule,
     Score,
@@ -373,6 +377,100 @@ def test_jev_pretokenized_arrow_sampling_and_resume(tmp_path, monkeypatch):
     assert reused["train_samples"] == 7
 
 
+
+
+def test_jev_training_sampling_validation_interval_and_cosine_optimizer(tmp_path):
+    rows = [
+        {
+            "id": f"r{i}",
+            "source": f"source_{i % 2}",
+            "kind": ("noul", "choice", "score")[i % 3],
+        }
+        for i in range(20)
+    ]
+    split = Dataset.from_list(rows)
+    prepared = tmp_path / "prepared"
+    DatasetDict(
+        {
+            "train": split,
+            "val": split,
+            "validation": split,
+            "calibration": split,
+            "test": split,
+            "test_set_30k": split,
+            "ood": split,
+        }
+    ).save_to_disk(str(prepared))
+    tokenizer = SimpleNamespace(pad_token_id=0, padding_side="right")
+    datamodule = JevDataModule(
+        prepared,
+        tokenizer,
+        train_max_samples=10,
+        val_max_samples=5,
+        train_sampling="source_kind_round_robin",
+        sample_seed=42,
+    )
+    datamodule.setup("fit")
+    assert len(datamodule.train_dataset) == 10
+    assert len(datamodule.val_dataset) == 5
+    first_indices = list(datamodule.train_dataset.indices)
+
+    second = JevDataModule(
+        prepared,
+        tokenizer,
+        train_max_samples=10,
+        val_max_samples=5,
+        train_sampling="source_kind_round_robin",
+        sample_seed=42,
+    )
+    second.setup("fit")
+    assert list(second.train_dataset.indices) == first_indices
+
+    with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
+        cfg = compose(config_name="config", overrides=["command=train", "experiment=qwen38_27B_jev"])
+    recipe = JevDecisionRecipe(cfg)
+    fake_datamodule = SimpleNamespace(setup=lambda stage: None, train_dataset=[None] * 64000)
+    adapted = recipe.adapt_trainer_kwargs(
+        {"max_epochs": 1, "accumulate_grad_batches": 16, "val_check_interval": 500},
+        fake_datamodule,
+    )
+    assert adapted["val_check_interval"] == 4000
+
+    base_dir = create_tiny_qwen38_model_and_tokenizer(tmp_path / "tiny_qwen38")
+    lora_cfg = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_dropout=0.0,
+    )
+    module = QwenLoraLightningModule(
+        base_model_path=str(base_dir),
+        lora_config=lora_cfg,
+        torch_dtype="float32",
+        gradient_checkpointing=False,
+        lr=1e-4,
+        head_lr=2e-4,
+        warmup_ratio=0.1,
+        lr_scheduler_type="cosine",
+        min_lr_ratio=0.1,
+    )
+    module._trainer = SimpleNamespace(estimated_stepping_batches=100)
+    optimizer_cfg = module.configure_optimizers()
+    groups = optimizer_cfg["optimizer"].param_groups
+    assert {group["name"] for group in groups} == {"lora_decay", "scalar_head"}
+    assert next(group for group in groups if group["name"] == "scalar_head")["weight_decay"] == 0.0
+    optimizer = optimizer_cfg["optimizer"]
+    scheduler = optimizer_cfg["lr_scheduler"]["scheduler"]
+    for _ in range(11):
+        optimizer.step()
+        scheduler.step()
+    assert optimizer.param_groups[0]["lr"] < 1e-4
+    for _ in range(89):
+        optimizer.step()
+        scheduler.step()
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-5)
+
+
 def test_jev_data_config_defaults():
     with initialize_config_module(version_base="1.3", config_module="lmml.configs"):
         full = compose(config_name="config", overrides=["command=data", "experiment=qwen38_27B_jev"])
@@ -386,6 +484,14 @@ def test_jev_data_config_defaults():
         assert full.data.max_train_samples is None
         assert full.data.max_val_samples is None
         assert full.data.max_calibration_samples is None
+        assert full.data.train_max_samples == 64000
+        assert full.data.val_max_samples == 1024
+        assert full.data.batch_size == 2
+        assert full.data.val_batch_size == 4
+        assert full.algo.lr_scheduler_type == "cosine"
+        assert full.algo.val_every_n_opt_steps == 250
+        assert full.algo.model.attn_implementation == "flash_attention_2"
+        assert full.algo.model.use_liger_kernel is True
 
         smoke = compose(config_name="config", overrides=["command=data", "experiment=qwen38_27B_jev_smoke"])
         assert smoke.data.preprocessing_num_proc == 1

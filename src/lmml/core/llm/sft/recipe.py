@@ -166,6 +166,7 @@ class CausalLMSFTRecipe(Recipe):
             lora_target_modules=target_modules,
             max_new_tokens=int(algo.get("max_new_tokens", 128)),
             model_config=self._model_config(),
+            use_liger_kernel=bool(model_cfg.get("use_liger_kernel", False)),
         )
 
         if ckpt_path and os.path.isfile(ckpt_path):

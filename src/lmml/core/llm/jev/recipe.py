@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -91,6 +92,18 @@ class JevDecisionRecipe(Recipe):
             max_length=int(data.get("max_length", 512)),
             strict_length=bool(data.get("strict_length", False)),
             predict_requests=self._predict_requests(),
+            train_max_samples=(
+                data.get("train_max_samples")
+                if data.get("train_max_samples") is not None
+                else data.get("max_train_samples")
+            ),
+            val_max_samples=(
+                data.get("val_max_samples")
+                if data.get("val_max_samples") is not None
+                else data.get("max_val_samples")
+            ),
+            train_sampling=str(data.get("train_sampling", "source_kind_round_robin")),
+            sample_seed=int(data.get("sample_seed", self.cfg.seed)),
         )
         datamodule.tokenizer = tokenizer
         return datamodule
@@ -131,6 +144,8 @@ class JevDecisionRecipe(Recipe):
             head_lr=float(algo.get("head_lr", algo.get("lr", 2e-4))),
             weight_decay=float(algo.get("weight_decay", 0.01)),
             warmup_ratio=float(algo.get("warmup_ratio", 0.05)),
+            lr_scheduler_type=str(algo.get("lr_scheduler_type", "cosine")),
+            min_lr_ratio=float(algo.get("min_lr_ratio", 0.1)),
             brier_weight=float(algo.get("brier_weight", 0.1)),
             lora_r=int(algo.get("lora_r", 32)),
             lora_alpha=int(algo.get("lora_alpha", 64)),
@@ -142,6 +157,7 @@ class JevDecisionRecipe(Recipe):
             gradient_checkpointing=bool(model_cfg.get("use_gradient_checkpointing", True)),
             trust_remote_code=bool(model_cfg.get("trust_remote_code", True)),
             strict_length=bool(cfg.data.get("strict_length", False)),
+            use_liger_kernel=bool(model_cfg.get("use_liger_kernel", False)),
         )
         if lightning_ckpt is not None:
             module.load_trainable_from_lightning_ckpt(lightning_ckpt)
@@ -178,15 +194,47 @@ class JevDecisionRecipe(Recipe):
         trainer_kwargs: dict[str, Any],
         datamodule: pl.LightningDataModule,
     ) -> dict[str, Any]:
+        """Translate optimizer-step validation policy into Lightning batch units."""
         kwargs = dict(trainer_kwargs)
         datamodule.setup("fit")
         train_dataset = getattr(datamodule, "train_dataset", None)
-        if train_dataset is not None:
-            batch_size = max(1, int(self.cfg.data.get("batch_size", 1)))
-            num_batches = max(1, len(train_dataset) // batch_size)
+        if train_dataset is None:
+            return kwargs
+
+        batch_size = max(1, int(self.cfg.data.get("batch_size", 1)))
+        num_batches = max(1, math.ceil(len(train_dataset) / batch_size))
+        limit_train = kwargs.get("limit_train_batches")
+        if isinstance(limit_train, int) and 0 < limit_train < num_batches:
+            num_batches = limit_train
+
+        accumulate_raw = kwargs.get("accumulate_grad_batches", 1)
+        if isinstance(accumulate_raw, dict):
+            accumulate = int(max(accumulate_raw.values(), default=1))
+        else:
+            accumulate = max(1, int(accumulate_raw or 1))
+
+        val_every_opt_steps = self.cfg.algo.get("val_every_n_opt_steps")
+        if val_every_opt_steps is not None and int(val_every_opt_steps) > 0:
+            target = int(val_every_opt_steps) * accumulate
+            kwargs["val_check_interval"] = min(num_batches, max(1, target))
+        else:
             val_interval = kwargs.get("val_check_interval")
             if isinstance(val_interval, int) and val_interval > num_batches:
                 kwargs["val_check_interval"] = num_batches
+
+        max_epochs = int(kwargs.get("max_epochs", 1) or 1)
+        total_micro_batches = num_batches * max_epochs
+        total_opt_steps = max(1, math.ceil(total_micro_batches / accumulate))
+        actual_interval = int(kwargs.get("val_check_interval", num_batches))
+        console.print(
+            "[bold cyan][Jev Batch Map][/bold cyan] "
+            f"micro_batch={batch_size} x accumulate={accumulate} "
+            f"=> global_batch={batch_size * accumulate}; "
+            f"micro_batches/epoch={num_batches:,}, optimizer_steps/epoch={math.ceil(num_batches / accumulate):,}; "
+            f"epochs={max_epochs}, total_optimizer_steps={total_opt_steps:,}; "
+            f"val_every={actual_interval:,} micro_batches "
+            f"({math.ceil(actual_interval / accumulate):,} optimizer steps)"
+        )
         return kwargs
 
     def _export_top_k_peft_dirs(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -61,6 +62,8 @@ class QwenLoraLightningModule(pl.LightningModule):
         head_lr: float | None = None,
         weight_decay: float = 0.01,
         warmup_ratio: float = 0.05,
+        lr_scheduler_type: str = "cosine",
+        min_lr_ratio: float = 0.1,
         brier_weight: float = 0.1,
         lora_r: int = 32,
         lora_alpha: int = 64,
@@ -72,6 +75,7 @@ class QwenLoraLightningModule(pl.LightningModule):
         gradient_checkpointing: bool = True,
         trust_remote_code: bool = True,
         strict_length: bool = True,
+        use_liger_kernel: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(
@@ -83,6 +87,12 @@ class QwenLoraLightningModule(pl.LightningModule):
         self.head_lr = float(head_lr if head_lr is not None else lr)
         self.weight_decay = float(weight_decay)
         self.warmup_ratio = float(warmup_ratio)
+        self.lr_scheduler_type = str(lr_scheduler_type).strip().lower()
+        self.min_lr_ratio = min(1.0, max(0.0, float(min_lr_ratio)))
+        if self.lr_scheduler_type not in {"cosine", "constant", "constant_with_warmup"}:
+            raise ValueError(
+                "lr_scheduler_type must be 'cosine', 'constant', or 'constant_with_warmup'"
+            )
         self.brier_weight = float(brier_weight)
 
         self.model = JevDecisionModel(
@@ -101,6 +111,7 @@ class QwenLoraLightningModule(pl.LightningModule):
             trust_remote_code=trust_remote_code,
             is_trainable=True,
             strict_length=strict_length,
+            use_liger_kernel=use_liger_kernel,
         )
         self.tokenizer = self.model.tokenizer
         self._val_logits: list[list[float]] = []
@@ -154,6 +165,8 @@ class QwenLoraLightningModule(pl.LightningModule):
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=bsz)
         self.log("train/nll", ce_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True, batch_size=bsz)
         self.log("train/brier", brier_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True, batch_size=bsz)
+        self.log("train/ce_loss", ce_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True, batch_size=bsz)
+        self.log("train/brier_loss", brier_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True, batch_size=bsz)
         return loss
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
@@ -377,20 +390,54 @@ class QwenLoraLightningModule(pl.LightningModule):
             self.temperature = float(raw["jev_temperature"])
 
     def configure_optimizers(self) -> Any:
+        """AdamW with decay/no-decay groups + linear warmup + cosine decay.
+
+        LoRA matrices and the FP32 scalar head share the same optimizer but keep
+        separate learning rates. Biases and normalization parameters never get
+        weight decay.
+        """
         head_ids = {id(p) for p in self.model.head.parameters()}
-        backbone_params = [
-            p for p in self.model.parameters() if p.requires_grad and id(p) not in head_ids
+        backbone_named = [
+            (name, param)
+            for name, param in self.model.named_parameters()
+            if param.requires_grad and id(param) not in head_ids
         ]
         head_params = [p for p in self.model.head.parameters() if p.requires_grad]
 
+        def _no_decay(name: str) -> bool:
+            lowered = name.lower()
+            return "bias" in lowered or "norm" in lowered or "layernorm" in lowered
+
+        backbone_decay = [p for name, p in backbone_named if not _no_decay(name)]
+        backbone_no_decay = [p for name, p in backbone_named if _no_decay(name)]
+
         param_groups: list[dict[str, Any]] = []
-        if backbone_params:
+        if backbone_decay:
             param_groups.append(
-                {"params": backbone_params, "lr": self.lr, "weight_decay": self.weight_decay}
+                {
+                    "params": backbone_decay,
+                    "lr": self.lr,
+                    "weight_decay": self.weight_decay,
+                    "name": "lora_decay",
+                }
+            )
+        if backbone_no_decay:
+            param_groups.append(
+                {
+                    "params": backbone_no_decay,
+                    "lr": self.lr,
+                    "weight_decay": 0.0,
+                    "name": "lora_no_decay",
+                }
             )
         if head_params:
             param_groups.append(
-                {"params": head_params, "lr": self.head_lr, "weight_decay": 0.0}
+                {
+                    "params": head_params,
+                    "lr": self.head_lr,
+                    "weight_decay": 0.0,
+                    "name": "scalar_head",
+                }
             )
 
         optimizer = torch.optim.AdamW(param_groups, lr=self.lr, weight_decay=self.weight_decay)
@@ -398,17 +445,31 @@ class QwenLoraLightningModule(pl.LightningModule):
             return optimizer
 
         total_steps = max(int(getattr(self.trainer, "estimated_stepping_batches", 1)), 1)
-        warmup_steps = max(int(total_steps * self.warmup_ratio), 1) if self.warmup_ratio > 0 else 0
+        warmup_steps = (
+            min(total_steps, max(int(total_steps * self.warmup_ratio), 1))
+            if self.warmup_ratio > 0
+            else 0
+        )
 
         def lr_lambda(step: int) -> float:
             if warmup_steps > 0 and step < warmup_steps:
                 return float(step + 1) / float(warmup_steps)
-            return 1.0
+            if self.lr_scheduler_type in {"constant", "constant_with_warmup"}:
+                return 1.0
+            decay_steps = max(1, total_steps - warmup_steps)
+            progress = min(1.0, max(0.0, float(step - warmup_steps) / decay_steps))
+            cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+            return self.min_lr_ratio + (1.0 - self.min_lr_ratio) * cosine
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+                "name": f"jev_{self.lr_scheduler_type}",
+            },
         }
 
 

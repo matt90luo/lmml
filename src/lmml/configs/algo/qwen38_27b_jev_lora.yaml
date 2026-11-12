@@ -1,8 +1,11 @@
 mode: lora
-lr: 2.0e-4
+lr: 1.0e-4
 head_lr: 2.0e-4
 weight_decay: 0.01
 warmup_ratio: 0.05
+lr_scheduler_type: cosine
+min_lr_ratio: 0.1
+val_every_n_opt_steps: 250
 matmul_precision: high
 brier_weight: 0.1
 lora_r: 32
@@ -25,14 +28,15 @@ lora_checkpoint_dir: null
 init_from: null
 model:
   name_or_path: ${paths.base_model_dir}/Qwen3.8-27B
-  attn_implementation: sdpa
+  attn_implementation: flash_attention_2
   torch_dtype: bfloat16
   use_gradient_checkpointing: true
+  use_liger_kernel: true
   trust_remote_code: true
 calibration:
   enabled: true
   max_samples: 4000
-  batch_size: 1
+  batch_size: 4
 export:
   enabled: true
   save_dir: ${paths.output_model_dir}/qwen38_27b_jev_final

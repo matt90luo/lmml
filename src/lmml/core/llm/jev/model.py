@@ -19,6 +19,7 @@ from transformers import (
 )
 
 from lmml.core.llm.jev.api import apply_candidate_chat_template, candidate_prompts
+from lmml.models.llm.builders import apply_liger_kernel_if_available, resolve_attn_implementation
 
 DEFAULT_JEV_LORA_TARGETS = (
     "q_proj",
@@ -111,9 +112,10 @@ def _extract_language_backbone_and_initial_head(
         or any("ConditionalGeneration" in arch or "ImageTextToText" in arch for arch in architectures)
     )
 
+    actual_attn = resolve_attn_implementation(attn_implementation)
     load_kwargs: dict[str, Any] = {
         "torch_dtype": torch_dtype,
-        "attn_implementation": attn_implementation,
+        "attn_implementation": actual_attn,
         "trust_remote_code": trust_remote_code,
     }
     device_map = os.environ.get("JEV_DEVICE_MAP")
@@ -122,13 +124,25 @@ def _extract_language_backbone_and_initial_head(
             json.loads(device_map) if device_map.lstrip().startswith("{") else device_map
         )
 
-    if is_multimodal:
-        full = AutoModelForImageTextToText.from_pretrained(base_model_path, **load_kwargs)
-    else:
+    def _load_full_model() -> Any:
+        if is_multimodal:
+            return AutoModelForImageTextToText.from_pretrained(base_model_path, **load_kwargs)
         try:
-            full = AutoModelForCausalLM.from_pretrained(base_model_path, **load_kwargs)
+            return AutoModelForCausalLM.from_pretrained(base_model_path, **load_kwargs)
         except (OSError, ValueError, KeyError):
-            full = AutoModel.from_pretrained(base_model_path, **load_kwargs)
+            return AutoModel.from_pretrained(base_model_path, **load_kwargs)
+
+    try:
+        full = _load_full_model()
+    except (ImportError, ValueError) as exc:
+        if actual_attn == "sdpa":
+            raise
+        print(
+            f"[Attention] {actual_attn} 不可用于 {base_model_path}，"
+            f"自动回退到 SDPA: {type(exc).__name__}: {exc}"
+        )
+        load_kwargs["attn_implementation"] = "sdpa"
+        full = _load_full_model()
 
     initial_vector: torch.Tensor | None = None
     out_emb = full.get_output_embeddings() if hasattr(full, "get_output_embeddings") else None
@@ -178,6 +192,7 @@ class JevDecisionModel(nn.Module):
         trust_remote_code: bool = True,
         is_trainable: bool = True,
         strict_length: bool = True,
+        use_liger_kernel: bool = False,
     ) -> None:
         super().__init__()
         from peft import LoraConfig, PeftModel, get_peft_model
@@ -216,6 +231,16 @@ class JevDecisionModel(nn.Module):
         backbone.config.use_cache = False
         for param in backbone.parameters():
             param.requires_grad = False
+
+        # Liger patches the language model before PEFT wraps it. Jev has no LM
+        # head, so only RMSNorm/SwiGLU fusion is enabled (FLCE stays off).
+        self.liger_enabled = apply_liger_kernel_if_available(
+            backbone,
+            use_liger_kernel=bool(use_liger_kernel),
+            fused_linear_cross_entropy=False,
+            rms_norm=True,
+            swiglu=True,
+        )
 
         # 2. Initialize FP32 Linear(hidden_size, 1) scalar head
         self.head = nn.Linear(hidden_size, 1, bias=True, dtype=torch.float32)
@@ -455,6 +480,7 @@ class JevDecisionModel(nn.Module):
             "torch_dtype": str(self.torch_dtype).replace("torch.", ""),
             "temperature": temp_value,
             "method": "independent_candidate_lora_nll_brier",
+            "use_liger_kernel": bool(self.liger_enabled),
             "extra": dict(extra or {}),
         }
         (out / "model.json").write_text(
@@ -474,6 +500,7 @@ class JevDecisionModel(nn.Module):
         is_trainable: bool = False,
         max_length: int | None = None,
         strict_length: bool = True,
+        use_liger_kernel: bool | None = None,
     ) -> JevDecisionModel:
         out = Path(checkpoint_dir)
         model_json = out / "model.json"
@@ -500,6 +527,9 @@ class JevDecisionModel(nn.Module):
             gradient_checkpointing=bool(is_trainable),
             is_trainable=bool(is_trainable),
             strict_length=strict_length,
+            use_liger_kernel=bool(
+                meta.get("use_liger_kernel", False) if use_liger_kernel is None else use_liger_kernel
+            ),
         )
         model.to(device)
         if not is_trainable:

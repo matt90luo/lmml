@@ -21,6 +21,7 @@
 3. **Jev Decision Model (`Qwen3.8-27B` + Rank-32 LoRA + FP32 Scalar Head)**：
    - 对齐 Open-Jev 独立候选打分架构：`chat_template(context, question, candidate) -> Qwen3.8-27B language_model + LoRA -> last non-padding token hidden state -> FP32 Linear(hidden_size, 1) -> softmax`。
    - 支持两段式加载（冻结基座 + 新建或从 `lora_checkpoint_dir` 恢复 LoRA & Head 权重）、软目标 `Cross-Entropy + 0.1 * Brier Loss`、Validation `save_top_k=2` 保存至 Google Drive、阶段二温度校准与阶段三（`test` / `test_set_30k` / `ood`）验收。
+   - 默认使用 `AdamW + 5% Warmup + Cosine Decay`、训练期分层采样、按优化器步数触发验证、FlashAttention-2 自动回退与 Liger RMSNorm/SwiGLU 融合；附带 FakeTensor 显存峰值估算工具。
 
 4. **Kev Decision Model (`Qwen3.5` + PointerHead)**：
    - 支持 `Noul` / `Choice` / `Score` 强类型判定原语，一次 Prefill 返回概率、置信度与有序分数。
@@ -99,7 +100,47 @@ lmml test experiment=qwen38_27B_jev \
 lmml predict experiment=qwen38_27B_jev \
   ckpt_path=/content/drive/MyDrive/colab-notes/data/models/qwen38_27b_jev_final \
   predict.output=/content/jev_predictions.jsonl
+
+# 5. 训练期采样：默认 64,000 train / 1,024 validation，无需重跑 lmml data
+#    如需全量 643,500 条训练集，直接覆盖为 null
+lmml train experiment=qwen38_27B_jev data.train_max_samples=null
+lmml train experiment=qwen38_27B_jev data.train_max_samples=128000 data.val_max_samples=2048
 ```
+
+### Batch、Step 与 WandB 对应关系
+
+默认训练参数为 `data.batch_size=2`、`trainer.accumulate_grad_batches=16`，单卡等效 `global_batch_size=32`。一个 64,000 条样本的 Epoch 包含 32,000 个 micro-batch、2,000 次优化器更新：
+
+| 指标 | 含义 | 默认值 |
+| :--- | :--- | :--- |
+| `micro_batch_size` | 每次 forward/backward 的 question 行数；每个 question 再展开候选序列 | 2 |
+| `accumulate_grad_batches` | 累积多少个 micro-batch 才执行一次 `optimizer.step()` | 16 |
+| `global_batch_size` | `micro_batch_size * accumulate_grad_batches * devices` | 32 |
+| `micro_batches/epoch` | 进度条与 Lightning 的 `batch_idx` 范围 | 32,000 |
+| `optimizer_steps/epoch` | WandB 横轴 `trainer/global_step` 的总步数 | 2,000 |
+| `val_every_n_opt_steps` | 每多少次优化器更新执行一次中途验证 | 250 |
+| `val_check_interval` | Lightning 实际使用的 micro-batch 验证间隔 | 4,000 |
+
+WandB 中重点查看 `train/loss`、`train/ce_loss`、`train/brier_loss`、`val/loss`、`val/expected_acc`、`val/ece` 以及 `lr-AdamW/pg*`。验证间隔由 `algo.val_every_n_opt_steps` 自动换算，不再手动把优化器步数误写成 dataloader batch 数。
+
+### Liger-Kernel、FlashAttention-2 与显存估算
+
+- `algo.model.attn_implementation=flash_attention_2`：Colab 安装 `flash-attn` 且 CUDA 可用时启用；否则自动回退到 `sdpa`，不影响训练。
+- `algo.model.use_liger_kernel=true`：Jev 模型只融合 `Qwen3.5/3.8` 的 RMSNorm 与 SwiGLU MLP，不启用 FLCE（因为 Jev 已剥离 `lm_head`）；标准 CausalLM SFT 可同时启用 FLCE 消除词表 Logits 峰值。缺少 Liger 或运行在 CPU 时自动回退。
+- 本地无 GPU 也可以先估算显存：
+
+```bash
+python -m lmml.utils.vram_estimator \
+  --model /content/Qwen3.8-27B \
+  --mode jev --seq-len 512 --candidates 4 \
+  --vram-gb 80 --max-batch 32
+
+python -m lmml.utils.vram_estimator \
+  --model /content/Qwen3.8-27B \
+  --mode causal_lm --seq-len 2048 --vram-gb 80
+```
+
+估算器使用 `FakeTensorMode` 执行一次 forward/backward/AdamW step，并统计 fake storage 的峰值字节数；不会占用真实 GPU 显存。
 
 进程内 `TypeSafeClient` 调用：
 

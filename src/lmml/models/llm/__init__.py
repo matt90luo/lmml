@@ -2,6 +2,7 @@
 
 from lmml.models.llm.builders import (
     DEFAULT_QWEN35_LORA_TARGET_MODULES,
+    apply_liger_kernel_if_available,
     build_causal_lm,
     chunked_for_causal_lm_loss,
     resolve_attn_implementation,
@@ -16,6 +17,7 @@ __all__ = [
     "MiniMindConfig",
     "MiniMindCriticForCausalLM",
     "MiniMindForCausalLM",
+    "apply_liger_kernel_if_available",
     "build_causal_lm",
     "chunked_for_causal_lm_loss",
     "register_minimind",

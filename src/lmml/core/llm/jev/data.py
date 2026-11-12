@@ -3,15 +3,85 @@
 from __future__ import annotations
 
 import json
+import random
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import lightning.pytorch as pl
 import torch
+from rich.console import Console
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from lmml.core.llm.jev.api import apply_candidate_chat_template, candidate_prompts, compile_request
 from lmml.datas.llm.prepare import load_prepared_dataset
+
+console = Console()
+
+
+def _dataset_column(dataset: Dataset, name: str) -> list[Any] | None:
+    """Read a column from the Arrow-backed dataset when it exists."""
+    arrow = getattr(dataset, "dataset", dataset)
+    columns = getattr(arrow, "column_names", None)
+    if columns is None or name not in columns:
+        return None
+    try:
+        return list(arrow[name])
+    except Exception:  # noqa: BLE001 - optional sampling metadata must not break training
+        return None
+
+
+def _sample_indices(
+    dataset: Dataset,
+    max_samples: int,
+    *,
+    seed: int,
+    strategy: str,
+) -> list[int]:
+    """Deterministically select a compact training/validation index subset.
+
+    ``source_kind_round_robin`` keeps the decision mix balanced by taking one
+    row from each (source, kind) bucket in turn. ``random`` is used for
+    validation, where an unbiased shuffled subset is preferable.
+    """
+    total = len(dataset)
+    target = min(int(max_samples), total)
+    if target >= total:
+        return list(range(total))
+    rng = random.Random(int(seed))
+    if strategy != "source_kind_round_robin":
+        indices = list(range(total))
+        rng.shuffle(indices)
+        return indices[:target]
+
+    sources = _dataset_column(dataset, "source")
+    kinds = _dataset_column(dataset, "kind")
+    if sources is None or kinds is None:
+        indices = list(range(total))
+        rng.shuffle(indices)
+        return indices[:target]
+
+    buckets: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for index, (source, kind) in enumerate(zip(sources, kinds)):
+        buckets[(str(source), str(kind))].append(index)
+    keys = sorted(buckets)
+    for key in keys:
+        rng.shuffle(buckets[key])
+
+    selected: list[int] = []
+    cursor = 0
+    while len(selected) < target:
+        progressed = False
+        for key in keys:
+            if cursor < len(buckets[key]):
+                selected.append(buckets[key][cursor])
+                progressed = True
+                if len(selected) == target:
+                    break
+        if not progressed:
+            break
+        cursor += 1
+    return selected
 
 
 def _parse_row(item: dict[str, Any]) -> dict[str, Any]:
@@ -215,6 +285,10 @@ class JevDataModule(pl.LightningDataModule):
         max_length: int = 512,
         strict_length: bool = True,
         predict_requests: list[dict[str, Any]] | None = None,
+        train_max_samples: int | None = None,
+        val_max_samples: int | None = None,
+        train_sampling: str = "source_kind_round_robin",
+        sample_seed: int = 42,
     ) -> None:
         super().__init__()
         self.prepared_path = Path(prepared_path)
@@ -225,6 +299,16 @@ class JevDataModule(pl.LightningDataModule):
         self.max_length = int(max_length)
         self.strict_length = bool(strict_length)
         self.predict_requests = list(predict_requests or [])
+        self.train_max_samples = int(train_max_samples) if train_max_samples is not None else None
+        self.val_max_samples = int(val_max_samples) if val_max_samples is not None else None
+        if self.train_max_samples is not None and self.train_max_samples <= 0:
+            raise ValueError("train_max_samples must be positive or null")
+        if self.val_max_samples is not None and self.val_max_samples <= 0:
+            raise ValueError("val_max_samples must be positive or null")
+        self.train_sampling = str(train_sampling)
+        if self.train_sampling not in {"source_kind_round_robin", "random"}:
+            raise ValueError("train_sampling must be 'source_kind_round_robin' or 'random'")
+        self.sample_seed = int(sample_seed)
 
         self.collator = JevCollator(
             tokenizer,
@@ -238,12 +322,12 @@ class JevDataModule(pl.LightningDataModule):
         )
 
         self.splits: dict[str, JevArrowDataset] = {}
-        self.train_dataset: JevArrowDataset | None = None
-        self.val_dataset: JevArrowDataset | None = None
-        self.calibration_dataset: JevArrowDataset | None = None
-        self.test_dataset: JevArrowDataset | None = None
-        self.test_30k_dataset: JevArrowDataset | None = None
-        self.ood_dataset: JevArrowDataset | None = None
+        self.train_dataset: Dataset | None = None
+        self.val_dataset: Dataset | None = None
+        self.calibration_dataset: Dataset | None = None
+        self.test_dataset: Dataset | None = None
+        self.test_30k_dataset: Dataset | None = None
+        self.ood_dataset: Dataset | None = None
 
     def setup(self, stage: str | None = None) -> None:
         if self.train_dataset is not None:
@@ -252,12 +336,44 @@ class JevDataModule(pl.LightningDataModule):
         for name in loaded:
             self.splits[name] = JevArrowDataset(loaded[name])
 
-        self.train_dataset = self.splits["train"]
-        self.val_dataset = self.splits.get("validation") or self.splits.get("val") or self.train_dataset
-        self.calibration_dataset = self.splits.get("calibration") or self.val_dataset
-        self.test_dataset = self.splits.get("test") or self.val_dataset
+        full_train = self.splits["train"]
+        full_val = self.splits.get("validation") or self.splits.get("val") or full_train
+        self.train_dataset = self._subset(
+            full_train,
+            self.train_max_samples,
+            strategy=self.train_sampling,
+            seed=self.sample_seed,
+            label="train",
+        )
+        self.val_dataset = self._subset(
+            full_val,
+            self.val_max_samples,
+            strategy="random",
+            seed=self.sample_seed + 1,
+            label="validation",
+        )
+        self.calibration_dataset = self.splits.get("calibration") or full_val
+        self.test_dataset = self.splits.get("test") or full_val
         self.test_30k_dataset = self.splits.get("test_set_30k")
         self.ood_dataset = self.splits.get("ood")
+
+    @staticmethod
+    def _subset(
+        dataset: Dataset,
+        max_samples: int | None,
+        *,
+        strategy: str,
+        seed: int,
+        label: str,
+    ) -> Dataset:
+        if max_samples is None or int(max_samples) >= len(dataset):
+            return dataset
+        indices = _sample_indices(dataset, int(max_samples), seed=seed, strategy=strategy)
+        console.print(
+            f"[bold cyan][Jev Sample][/bold cyan] {label}: {len(dataset):,} -> {len(indices):,} "
+            f"(strategy={strategy}, seed={seed})"
+        )
+        return Subset(dataset, indices)
 
     def train_dataloader(self) -> DataLoader:
         self.setup("fit")

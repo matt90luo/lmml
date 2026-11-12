@@ -17,14 +17,22 @@ max_length: 512
 filter_overlong: true
 strict_length: false
 training_sampling: source_kind_round_robin
+# Preprocessing caps (null = keep all source rows). Training-time sampling is
+# controlled separately by train_max_samples / val_max_samples below.
 max_train_samples: null
 max_val_samples: null
 max_calibration_samples: null
 max_test_samples: null
 max_test_30k_samples: null
 max_ood_samples: null
-batch_size: 1
-val_batch_size: 1
+# Training-time sampling: do not re-prepare the 643k-row corpus just to shrink
+# one run. Set train_max_samples=null to consume the full train split.
+train_max_samples: 64000
+val_max_samples: 1024
+train_sampling: source_kind_round_robin
+sample_seed: 42
+batch_size: 2
+val_batch_size: 4
 num_workers: 0
 chat_end_token: "<|im_end|>"
 predict_requests:

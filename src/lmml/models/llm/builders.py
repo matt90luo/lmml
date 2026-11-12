@@ -103,17 +103,68 @@ DEFAULT_QWEN35_LORA_TARGET_MODULES: tuple[str, ...] = (
 
 
 def resolve_attn_implementation(requested_attn: str = "sdpa") -> str:
-    """检测当前环境是否支持 FlashAttention-2，不支持则平滑降级至 PyTorch SDPA。"""
-    req = str(requested_attn or "sdpa").strip()
-    if req == "flash_attention_2":
-        if importlib.util.find_spec("flash_attn") is not None:
-            console.print("[bold green][Attention][/bold green] 已检测到 flash_attn 库，启用 FlashAttention-2 加速。")
-            return "flash_attention_2"
+    """检测当前环境是否支持 FlashAttention，不支持则平滑降级至 PyTorch SDPA。"""
+    req = str(requested_attn or "sdpa").strip().lower()
+    if req in {"flash_attention_2", "flash_attention_3"}:
+        package = "flash_attn" if req == "flash_attention_2" else "flash_attn_3"
+        if importlib.util.find_spec(package) is not None and torch.cuda.is_available():
+            console.print(
+                f"[bold green][Attention][/bold green] 已检测到 {package} 库，启用 {req} 加速。"
+            )
+            return req
+        reason = "未安装对应库" if importlib.util.find_spec(package) is None else "当前没有可用 CUDA"
         console.print(
-            "[yellow][Warning] 未安装 flash-attn 库，已自动降级为 PyTorch 原生 SDPA (sdpa) 加速。[/yellow]"
+            f"[yellow][Warning] {reason}，已自动降级为 PyTorch 原生 SDPA (sdpa) 加速。[/yellow]"
         )
         return "sdpa"
     return req
+
+
+def apply_liger_kernel_if_available(
+    model: nn.Module,
+    *,
+    use_liger_kernel: bool = False,
+    fused_linear_cross_entropy: bool = False,
+    rms_norm: bool = True,
+    swiglu: bool = True,
+) -> bool:
+    """Apply Liger Triton kernels to an instantiated model when supported.
+
+    Jev uses ``fused_linear_cross_entropy=False`` because its backbone is a
+    ``language_model`` without an LM head. CausalLM SFT can enable FLCE to avoid
+    materializing ``[B, T, vocab]`` logits. Any unavailable dependency or CPU
+    runtime is treated as a non-fatal fallback to native PyTorch kernels.
+    """
+    if not use_liger_kernel:
+        return False
+    if not torch.cuda.is_available():
+        console.print(
+            "[yellow][Warning] Liger-Kernel 需要 CUDA/Triton，当前环境自动使用原生算子。[/yellow]"
+        )
+        return False
+    if importlib.util.find_spec("liger_kernel") is None:
+        console.print(
+            "[yellow][Warning] 未安装 liger-kernel，已自动使用原生 RMSNorm / SwiGLU 算子。[/yellow]"
+        )
+        return False
+    try:
+        from liger_kernel.transformers import _apply_liger_kernel_to_instance
+
+        _apply_liger_kernel_to_instance(
+            model=model,
+            rope=False,
+            cross_entropy=False,
+            fused_linear_cross_entropy=bool(fused_linear_cross_entropy),
+            rms_norm=bool(rms_norm),
+            swiglu=bool(swiglu),
+        )
+    except Exception as exc:  # noqa: BLE001 - optional accelerator must not break training
+        console.print(
+            f"[yellow][Warning] Liger-Kernel 应用失败，已回退原生算子: {type(exc).__name__}: {exc}[/yellow]"
+        )
+        return False
+    console.print("[bold green][Liger][/bold green] 已启用 RMSNorm / SwiGLU 融合算子。")
+    return True
 
 
 def resolve_torch_dtype(dtype_name: str | torch.dtype | None = "bfloat16") -> torch.dtype | str:
@@ -162,6 +213,7 @@ def build_causal_lm(
     lora_dropout: float = 0.05,
     lora_target_modules: Sequence[str] | None = None,
     model_config: dict[str, Any] | None = None,
+    use_liger_kernel: bool = False,
 ) -> nn.Module:
     """加载 CausalLM 基座并按 mode ('lora' | 'full') 装配可训练参数与显存优化。
 
@@ -211,17 +263,41 @@ def build_causal_lm(
             model = model.to(resolved_dtype)
     else:
         register_minimind()
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name_or_path,
-            dtype=resolved_dtype,
-            attn_implementation=actual_attn,
-            device_map=None,
-            trust_remote_code=trust_remote_code,
-        )
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path,
+                dtype=resolved_dtype,
+                attn_implementation=actual_attn,
+                device_map=None,
+                trust_remote_code=trust_remote_code,
+            )
+        except (ImportError, ValueError) as exc:
+            if actual_attn == "sdpa":
+                raise
+            console.print(
+                f"[yellow][Warning] {actual_attn} 加载失败，自动回退到 SDPA: "
+                f"{type(exc).__name__}: {exc}[/yellow]"
+            )
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path,
+                dtype=resolved_dtype,
+                attn_implementation="sdpa",
+                device_map=None,
+                trust_remote_code=trust_remote_code,
+            )
         if checkpoint_path:
             state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
             state = state.get("model", state.get("state_dict", state))
             model.load_state_dict(state, strict=False)
+    # Liger must patch the base PreTrainedModel before PEFT wraps it. For
+    # CausalLM SFT, FLCE removes the full-vocabulary logits tensor peak.
+    apply_liger_kernel_if_available(
+        model,
+        use_liger_kernel=bool(use_liger_kernel or cfg.get("use_liger_kernel", False)),
+        fused_linear_cross_entropy=True,
+        rms_norm=True,
+        swiglu=True,
+    )
     model.loss_function = chunked_for_causal_lm_loss
 
     if eos_token_id is not None:

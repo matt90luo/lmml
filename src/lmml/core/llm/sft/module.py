@@ -39,6 +39,7 @@ class CausalLMSFTLightningModule(pl.LightningModule):
         lora_target_modules: Sequence[str] = DEFAULT_QWEN35_LORA_TARGET_MODULES,
         max_new_tokens: int = 128,
         model_config: dict[str, Any] | None = None,
+        use_liger_kernel: bool = False,
     ):
         super().__init__()
         self.mode = str(mode).strip().lower()
@@ -70,6 +71,7 @@ class CausalLMSFTLightningModule(pl.LightningModule):
             lora_dropout=lora_dropout,
             lora_target_modules=self.lora_target_modules,
             model_config=model_config,
+            use_liger_kernel=use_liger_kernel,
         )
         self.train()
 
